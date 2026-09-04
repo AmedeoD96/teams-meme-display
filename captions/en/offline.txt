@@ -1,0 +1,7 @@
+Offline. The server is up, I am not.
+Signed out. Try again after the standup.
+Gone home. The pager is someone else's now.
+Offline. Deployment window closed.
+Not here. Check the runbook.
+Logged off. It's someone else's on-call.
+The office is closed. So is my laptop.

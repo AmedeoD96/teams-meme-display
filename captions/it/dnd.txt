@@ -1,0 +1,12 @@
+Non disturbare. Sto compilando. Non guardarmi.
+Incidente in produzione. Allontanarsi con garbo.
+Sono in prod. Va tutto bene. BENE.
+Modalità focus. Interrompermi costa 23 minuti.
+Deploy di venerdì. Pregate per me.
+Non disturbare, salvo incendio dell'edificio.
+E comunque prima controlla il runbook.
+Rollback in corso. Riprova più tardi. Molto.
+Non si interrompe una migrazione, e basta.
+git bisect in corso. Silenzio, grazie.
+Io e il database stiamo avendo un momento.
+Attualmente unico punto di rottura del sistema.

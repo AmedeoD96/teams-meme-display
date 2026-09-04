@@ -1,0 +1,6 @@
+Nessun PC mi parla. L'app è accesa?
+Collegamento seriale assente. Controlla il cavo.
+In attesa della nave madre...
+Disconnesso. Non sei tu, è l'USB.
+Nessun segnale. Verifica che l'app sia viva.
+Contatto perso. Hai provato a staccare e riattaccare?

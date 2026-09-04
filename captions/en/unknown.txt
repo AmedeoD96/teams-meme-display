@@ -1,0 +1,7 @@
+Status unknown. Much like this codebase.
+Cannot determine presence. Undefined is not a function.
+Teams says nothing. Very on-brand.
+Presence: null. Handle with care.
+No status found. Have you tried restarting Teams?
+Schrodinger's developer: both busy and free.
+404: Status not found.

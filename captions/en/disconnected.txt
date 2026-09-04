@@ -1,0 +1,6 @@
+No PC talking to me. Is the app running?
+Serial link down. Check the cable.
+Waiting for the mothership...
+Disconnected. It's not you, it's USB.
+No signal. Check that the tray app is alive.
+Lost contact. Have you tried unplugging it?

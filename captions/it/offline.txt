@@ -1,0 +1,7 @@
+Offline. Il server è su, io no.
+Disconnesso. Riprova dopo lo stand-up.
+Sono a casa. Il reperibile è un altro.
+Offline. Finestra di deploy chiusa.
+Non ci sono. Consulta il runbook.
+Sloggato. Il turno di reperibilità è di altri.
+L'ufficio è chiuso. Anche il mio portatile.
