@@ -13,6 +13,31 @@ Teams log files ──tail──> tray app ──USB serial──> ESP32 ──>
                                     "STATUS:IN_MEETING"
 ```
 
+## What it looks like
+
+![Portrait, image mode](docs/images/portrait-image-mode.png)
+
+The default: portrait, Italian, a meme filling the screen with a rotating caption along the
+bottom. The images above are the bundled placeholders — drop your own into `memes/<status>/` and
+they take their place.
+
+There is a second display mode with no images at all. The background is the Teams status colour,
+and the caption cross-fades when it changes:
+
+![Portrait, text-only mode](docs/images/portrait-text-mode.png)
+
+Landscape works too, and is switched from the tray menu without reflashing:
+
+![Landscape, image mode](docs/images/landscape-image-mode.png)
+
+Captions come in English or Italian, again switchable at runtime:
+
+![English and Italian captions](docs/images/languages.png)
+
+> These are renders of what the firmware draws, produced by
+> `python tools/make_docs_images.py` — same layout, colours and caption wrapping as the panel,
+> with a desktop font standing in for the display's. They are not photographs.
+
 ## What you need
 
 - An **ESP32-2432S028R** ("Cheap Yellow Display", 2.8" 320x240 ILI9341, 4MB flash) and a USB cable.
@@ -67,7 +92,8 @@ jpg, webp, bmp, gif. Then:
 This resizes everything for both orientations (320x240 and 240x320), encodes baseline JPEG (the
 only kind the ESP32 decoder reads), packs it into `firmware/data/`, and — with `--preview` —
 renders both display modes into `preview/` so you can check framing and captions
-**without any hardware**. Add `--preview-lang it` for Italian captions, or `--preview-mode text` for just the text-only screens.
+**without any hardware**. Add `--preview-lang it` for Italian captions, or `--preview-mode text`
+for just the text-only screens.
 
 The project ships with one generated placeholder per status so it works before you add anything.
 Statuses with no memes get a built-in drawn scene instead.
@@ -101,7 +127,13 @@ Check it worked:
 ..\.venv\Scripts\pio device monitor
 ```
 
-You should see `LOG:panel 320x240`, `LOG:N memes across 9 statuses` and `READY:1.0.0`.
+You should see something like:
+
+```
+LOG:panel 240x320, mode image
+LOG:9 memes (port), language it, mode image
+READY:1.2.0
+```
 
 ### 5. Run the tray app
 
@@ -248,6 +280,7 @@ pc_app/          Windows tray app: log tailing, presence state machine, serial l
 firmware/        PlatformIO project for the CYD (TFT_eSPI + TJpg_Decoder, no LVGL)
 tools/           Meme pack builder and the placeholder art generator
 captions/        Joke banks, per language and status
+docs/images/     README screenshots (regenerate: tools/make_docs_images.py)
 pc_app/i18n.py   Tray menu strings and status labels per language
 memes/           Your source images, one folder per status
 docs/PROTOCOL.md The serial contract between the two halves
