@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "tokensave": {
+      "command": "C:/Users/amede/.cargo/bin/tokensave.exe",
+      "args": [
+        "serve"
+      ]
+    }
+  }
+}
