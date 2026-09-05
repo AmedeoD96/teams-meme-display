@@ -1,8 +1,13 @@
 # Teams status meme display
 
-A desk gadget that watches your Microsoft Teams presence and shows a matching IT/developer meme
-on a little ESP32 screen. Green means people can bother you. Purple means you are in yet another
-meeting that could have been an email.
+A desk gadget that watches your Microsoft Teams presence and puts it on a little ESP32 screen --
+as an animated mascot, a meme, or plain text. Green means people can bother you. Purple means you
+are in yet another meeting that could have been an email.
+
+What it says is up to you. A **tone** setting picks the register independently of your actual
+status, so you can be technically available and still phrase it as *"available in the way a fire
+exit is available"*. Phrases are edited in a window, not a text file, and reach the board over
+USB immediately -- no rebuild, no reflash.
 
 Inspired by the architecture of [vostoklabs/bongo_cat_monitor](https://github.com/vostoklabs/bongo_cat_monitor):
 a Windows tray app pushes short lines over USB serial to an ESP32-2432S028R. Here the input is
@@ -15,13 +20,41 @@ Teams log files ──tail──> tray app ──USB serial──> ESP32 ──>
 
 ## What it looks like
 
+![Portrait, mascot mode](docs/images/portrait-mascot-mode.png)
+
+The default: portrait, Italian, an animated character whose expression follows your status, with
+a rotating phrase along the bottom. It blinks, bobs, slumps and twitches; the dot in the corner
+is the real Teams status, drawn the way Teams draws it on your avatar.
+
+The mascot is composed from shapes by the firmware rather than flashed as artwork. A full-screen
+animation frame would be ~150 KB as a bitmap and ~100 ms to decode as a JPEG, and this board has
+neither the flash nor the PSRAM for that — but it has cycles to spare, so the character is drawn
+into a sprite about 25 times a second instead. It costs no flash at all.
+
+### Tones
+
+![The three tones](docs/images/tones.png)
+
+The same status, three registers. The badge stays green in all three — the tone changes the face
+and the words, never the truth:
+
+- **Normale** — says what it sees.
+- **Sarcasmo** — unimpressed whatever is going on. Half-lidded eyes, one raised brow, and phrases
+  that discourage you from coming over even while the badge says you are free.
+- **Golden Retriever** — delighted to help regardless of how buried you are. Wide eyes, a big
+  grin and an offer to drop everything.
+
+Tone is picked from the tray menu or the settings window and applies to both languages.
+
+### The other display modes
+
+The original meme mode is still there:
+
 ![Portrait, image mode](docs/images/portrait-image-mode.png)
 
-The default: portrait, Italian, a meme filling the screen with a rotating caption along the
-bottom. The images above are the bundled placeholders — drop your own into `memes/<status>/` and
-they take their place.
+Drop your own images into `memes/<status>/` and they take the place of the bundled placeholders.
 
-There is a second display mode with no images at all. The background is the Teams status colour,
+And a third mode with no images at all. The background is the Teams status colour,
 and the caption cross-fades when it changes:
 
 ![Portrait, text-only mode](docs/images/portrait-text-mode.png)
@@ -130,9 +163,9 @@ Check it worked:
 You should see something like:
 
 ```
-LOG:panel 240x320, mode image
-LOG:9 memes (port), language it, mode image
-READY:1.2.0
+LOG:panel 240x320, mode mascot
+LOG:9 memes (port), language it, mode mascot, tone normal
+READY:1.3.0
 ```
 
 ### 5. Run the tray app
@@ -142,7 +175,25 @@ READY:1.2.0
 ```
 
 It finds the board by itself (it probes COM ports and only keeps one that answers the handshake).
-Right-click the tray icon to force a status, skip to the next meme, or start it with Windows.
+Right-click the tray icon to force a status, change the tone, skip to the next meme, or start it
+with Windows. **Messages and settings...** — or a double-click on the icon — opens the window.
+
+## The settings window
+
+Everything worth changing has a control, and the panel is rendered live beside it at life size so
+you can see what a phrase will look like before it gets there.
+
+- **Messages** — pick a language, a tone and a status, then add, edit, reorder or delete the
+  phrases for that combination. Warnings appear as you type: characters the display cannot draw,
+  and phrases that need more lines than the caption band has. **Show on device** puts one on the
+  screen straight away.
+- **Look** — display mode, tone, language, orientation, brightness, rotation, caption fade, clock.
+  Every change is sent to the board as you make it.
+- **Device** — connection state, reconnect, start with Windows, and the config folder.
+
+Edits take effect on the next rotation tick. There is nothing to rebuild and nothing to reflash,
+because the phrases live on the PC and are pushed over USB — see
+[Who owns the words](docs/PROTOCOL.md#who-owns-the-words).
 
 ## Standalone .exe
 
@@ -165,12 +216,20 @@ That log is the first place to look if it seems to do nothing.
 
 ## Display mode
 
-**Display** in the tray menu switches between:
+**Display** in the tray menu (or the settings window) switches between:
 
+- **Mascot** -- the animated character on a dimmed status colour, with the phrase in a band along
+  the bottom and a presence badge in the corner. The default. Needs nothing flashed.
 - **Image + text** -- a meme filling the screen with the caption in a band along the bottom.
-- **Text only** -- no images at all. The background is the Teams status colour, the status name
-  sits at the top, and the caption fills the middle. Text is black or white depending on which
-  reads better on that colour, so the light green and amber themes stay legible.
+- **Text only** -- no images at all. The background is the Teams status colour, a Teams-style
+  presence badge sits at the top, and the caption fills the middle. Text is black or white
+  depending on which reads better on that colour, so the light green and amber themes stay
+  legible.
+
+The badge uses the same glyphs as the tray icon -- a tick for available, a minus for do not
+disturb, a clock for away, and so on -- so the two read as one family. It is drawn inverted
+relative to Teams, as a disc in the text colour with the glyph punched out of it: the background
+is already the status colour, so a status-coloured disc would be invisible.
 
 In text mode a caption change **cross-fades**: the old line fades into the background and the new
 one fades up out of it. Toggle it with **Fade between captions** in the same submenu, or set
@@ -209,10 +268,18 @@ space, build just the one you use:
 If a meme only crops well one way round, name it `something.land.png` or `something.port.png` and
 it is built for that orientation only. Anything without a suffix is built for both.
 
-## Captions
+## Phrases
 
-`captions/<lang>/<status>.txt` holds one joke per line; a random one is drawn each time the meme
-changes. Edit them, re-run `build_memes.py`, and `pio run -t uploadfs`.
+The easy way is the **Messages** tab of the settings window. Your phrases are stored in
+`%APPDATA%\TeamsMemeDisplay\phrases.json` and pushed to the board as it runs.
+
+The banks that file is seeded from live in `captions/<lang>/<tone>/<status>.txt`, one phrase per
+line. Editing those changes what a *fresh* install starts with, so it is the right place for
+phrases you want to keep in the repo; the settings window is the right place for everything else.
+A tone with an empty bank falls back to `normal`, so a half-finished set is never fatal.
+
+Only the `normal` banks are flashed to the board, as the fallback for when no PC is attached.
+That is the one case where you still need `build_memes.py` and `pio run -t uploadfs`.
 
 ## Configuration
 
@@ -230,7 +297,8 @@ changes. Edit them, re-run `build_memes.py`, and `pio run -t uploadfs`.
 | `rotate_seconds` | `30` | Meme rotation; `0` disables |
 | `language` | `"it"` | Caption and menu language: `en` or `it` |
 | `orientation` | `"portrait"` | `landscape` or `portrait` |
-| `display_mode` | `"image"` | `image` (meme + caption) or `text` (caption only) |
+| `display_mode` | `"mascot"` | `mascot`, `image` (meme + caption) or `text` (caption only) |
+| `tone` | `"normal"` | Phrasing register: `normal`, `sarcastic` or `retriever` |
 | `transition_ms` | `400` | Caption cross-fade duration; `0` switches instantly |
 
 ## Testing
@@ -277,9 +345,14 @@ differ and this is the one part not verified on hardware. Everything else is una
 
 ```
 pc_app/          Windows tray app: log tailing, presence state machine, serial link
+pc_app/gui.py    The settings window: phrase editor, device settings, live preview
+pc_app/phrases.py   The phrase bank the PC pushes to the board
+pc_app/mascot_faces.py  Every expression, as parameters -- the source of truth for both sides
+pc_app/render.py Draws a panel frame on the PC, for the previews and the GUI
 firmware/        PlatformIO project for the CYD (TFT_eSPI + TJpg_Decoder, no LVGL)
-tools/           Meme pack builder and the placeholder art generator
-captions/        Joke banks, per language and status
+firmware/src/mascot.cpp  The character, composed from shapes into a sprite
+tools/           Meme pack builder, mascot table generator, placeholder art
+captions/        Phrase banks, per language, tone and status
 docs/images/     README screenshots (regenerate: tools/make_docs_images.py)
 pc_app/i18n.py   Tray menu strings and status labels per language
 memes/           Your source images, one folder per status

@@ -15,7 +15,7 @@
 
 namespace {
 
-constexpr char kVersion[] = "1.2.0";
+constexpr char kVersion[] = "1.3.0";
 
 // Show DISCONNECTED if the PC stops sending its STATUS heartbeat for this long. The app resends
 // every 5s by default, so this tolerates two missed beats before complaining.
@@ -24,17 +24,23 @@ constexpr uint32_t kPcTimeoutMs = 15000;
 Preferences gPrefs;
 
 Status gStatus = Status::Disconnected;
+Tone gTone = Tone::Normal;
 uint16_t gRotateSeconds = 30;
 uint32_t gLastFrameMs = 0;
 bool gTimedOut = true;
 
+// The phrase the PC last sent. While this is set the PC owns the wording -- it holds the phrase
+// bank and knows the tone -- and the flashed bank in LittleFS is only the fallback for when
+// nothing is driving us. Cleared on a PC timeout, which is what hands the board back to itself.
+String gPcCaption;
+
 void renderFrame() {
-  // Text mode never draws a meme, so do not spend a LittleFS read picking one -- this runs on
-  // every rotation tick.
+  // Only image mode draws a meme, so do not spend a LittleFS read picking one otherwise -- this
+  // runs on every rotation tick.
   const String meme =
-      display::mode() == DisplayMode::Text ? String() : content::nextMeme(gStatus);
-  const String caption = content::nextCaption(gStatus);
-  display::showFrame(gStatus, content::language(), meme, caption);
+      display::mode() == DisplayMode::Image ? content::nextMeme(gStatus) : String();
+  const String caption = gPcCaption.isEmpty() ? content::nextCaption(gStatus) : gPcCaption;
+  display::showFrame(gStatus, content::language(), gTone, meme, caption);
   gLastFrameMs = millis();
 }
 
@@ -76,6 +82,21 @@ void onDisplayMode(DisplayMode displayMode) {
   renderFrame();
 }
 
+void onTone(Tone tone) {
+  if (tone == gTone) return;
+  gTone = tone;
+  gPrefs.putUChar("tone", static_cast<uint8_t>(tone));
+  Serial.printf("LOG:tone %s\n", toneName(tone));
+  renderFrame();  // the mascot is wearing the old expression
+}
+
+// The PC choosing our words. Repeats are ignored so a resend costs nothing.
+void onCaption(const String &caption) {
+  if (caption == gPcCaption) return;
+  gPcCaption = caption;
+  renderFrame();
+}
+
 void onTransition(uint16_t ms) {
   if (ms == display::transitionMs()) return;
   display::setTransitionMs(ms);
@@ -105,12 +126,21 @@ void checkPcTimeout() {
   gTimedOut = true;
   Serial.println(F("LOG:PC timeout"));
   gStatus = Status::Disconnected;
+  // Nobody is choosing our words any more, so fall back to the flashed bank rather than leaving
+  // the last thing the PC said frozen on screen.
+  gPcCaption = "";
   renderFrame();
 }
 
 void checkRotation() {
   if (gRotateSeconds == 0) return;
   if (millis() - gLastFrameMs < static_cast<uint32_t>(gRotateSeconds) * 1000UL) return;
+  // With a PC attached the wording is its business, and it runs a rotation timer of its own.
+  // Outside image mode there is nothing else to rotate, so repainting here would only fight it.
+  if (!gPcCaption.isEmpty() && display::mode() != DisplayMode::Image) {
+    gLastFrameMs = millis();
+    return;
+  }
   // Nothing to rotate through if there is at most one meme for this status; the caption still
   // changes, which is reason enough to repaint.
   renderFrame();
@@ -135,7 +165,8 @@ void setup() {
   // driven by a fresh install.
   const Language language = storedEnum("lang", kLanguageCount, Language::It);
   const Orientation orientation = storedEnum("orient", kOrientationCount, Orientation::Portrait);
-  const DisplayMode displayMode = storedEnum("mode", kDisplayModeCount, DisplayMode::Image);
+  const DisplayMode displayMode = storedEnum("mode", kDisplayModeCount, DisplayMode::Mascot);
+  gTone = storedEnum("tone", kToneCount, Tone::Normal);
 
   display::begin(orientation, displayMode);
   display::setBrightness(brightness);
@@ -156,6 +187,8 @@ void setup() {
   handlers.onOrientation = onOrientation;
   handlers.onDisplayMode = onDisplayMode;
   handlers.onTransition = onTransition;
+  handlers.onTone = onTone;
+  handlers.onCaption = onCaption;
   serial_link::begin(handlers);
 
   Serial.printf("LOG:%u memes (%s), language %s, mode %s\n", content::totalMemes(),
@@ -167,8 +200,14 @@ void setup() {
 
 void loop() {
   serial_link::poll();
-  if (touch::tapped()) renderFrame();
+  if (touch::tapped()) {
+    // Tell the PC so it can send a fresh phrase; the meme we can change on our own.
+    Serial.println(F("EVT:NEXT"));
+    renderFrame();
+  }
   checkPcTimeout();
   checkRotation();
+  // Drives the mascot animation and its caption fade. Returns immediately in the other modes.
+  display::tick(gStatus, gTone);
   delay(10);
 }

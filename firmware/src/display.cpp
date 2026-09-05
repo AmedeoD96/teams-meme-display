@@ -4,6 +4,8 @@
 #include <TFT_eSPI.h>
 #include <TJpg_Decoder.h>
 
+#include "mascot.h"
+
 namespace display {
 namespace {
 
@@ -27,12 +29,45 @@ constexpr uint8_t kBacklightBits = 8;
 
 constexpr uint16_t kCaptionBg = TFT_BLACK;
 constexpr uint16_t kCaptionFg = TFT_WHITE;
-constexpr uint8_t kCaptionFont = 2;  // TFT_eSPI font 2: 16px tall, proportional
 constexpr uint8_t kTextModeFont = 4;  // font 4: 26px tall, for the roomier text-only layout
 constexpr int16_t kTextModeLineH = 26;
 
+// The status badge that heads the text-mode screen, in place of the status name.
+constexpr int16_t kTextBadgeCy = 26;
+constexpr int16_t kTextBadgeR = 16;
+constexpr int16_t kTextRuleY = 50;
+//: Where the caption block starts, clear of the badge and its rule.
+constexpr int16_t kTextTop = 58;
+
+// How the caption band is currently laid out. The font is chosen per caption, so the height is
+// not fixed and the band has to remember where its top was -- see layoutCaptionBand().
+struct BandLayout {
+  String lines[kCaptionMaxLines];
+  uint8_t count = 0;
+  uint8_t font = kCaptionFontSmall;
+  int16_t lineH = kCaptionLineHSmall;
+  int16_t top = 0;
+};
+
+//: Top of the band as last painted, or -1 when nothing is there. A caption that wraps to fewer
+//: lines than the one before it needs a shorter band, and clearing only the shorter band would
+//: leave the tail of the old caption stranded above it.
+int16_t gBandTop = -1;
+
 //: Steps in a fade. Enough to look continuous without making a short transition feel steppy.
 constexpr uint8_t kFadeSteps = 10;
+
+// Mascot mode fades its caption from the animation tick instead of blocking in a delay() loop,
+// so this holds the fade in progress between frames.
+struct SteppedFade {
+  bool active = false;
+  uint8_t step = 0;
+  uint32_t nextMs = 0;
+  uint16_t perStepMs = 0;
+  BandLayout band;
+};
+
+SteppedFade gCaptionFade;
 
 // The panel is natively 240x320 portrait, so rotation 0 is portrait and rotation 1 landscape.
 uint8_t rotationFor(Orientation orientation) {
@@ -117,11 +152,12 @@ uint8_t wrapText(const String &text, String *lines, uint8_t maxLines, int16_t ma
 
 // Draw the caption band's text in *colour*. Used both for the final draw and for each fade step,
 // so the band itself is only filled once by the caller.
-void paintCaptionText(const String *lines, uint8_t count, int16_t top, uint16_t colour) {
+void paintCaptionText(const BandLayout &band, uint16_t colour) {
   tft.setTextDatum(TL_DATUM);
   tft.setTextColor(colour, kCaptionBg);
-  for (uint8_t i = 0; i < count; ++i) {
-    tft.drawString(lines[i], kCaptionPadX, top + kCaptionPadY + i * kCaptionLineH, kCaptionFont);
+  for (uint8_t i = 0; i < band.count; ++i) {
+    tft.drawString(band.lines[i], kCaptionPadX, band.top + kCaptionPadY + i * band.lineH,
+                   band.font);
   }
 }
 
@@ -142,14 +178,14 @@ TextLayout layoutTextMode(const String &caption) {
   // Prefer the big font; drop to the small one if the caption would not fit the screen.
   out.count = wrapText(caption, out.lines, kTextModeMaxLines, maxWidth, kTextModeFont);
   int16_t needed = out.count * kTextModeLineH;
-  const int16_t available = tft.height() - 64;  // leave room for the status label above
+  const int16_t available = tft.height() - kTextTop - 8;  // leave the header its room
   if (needed > available) {
-    out.font = kCaptionFont;
-    out.lineH = kCaptionLineH + 4;
+    out.font = kCaptionFontSmall;
+    out.lineH = kCaptionLineHSmall + 4;
     out.count = wrapText(caption, out.lines, kTextModeMaxLines, maxWidth, out.font);
     needed = out.count * out.lineH;
   }
-  out.top = 52 + (tft.height() - 52 - needed) / 2;
+  out.top = kTextTop + (tft.height() - kTextTop - needed) / 2;
   return out;
 }
 
@@ -162,20 +198,81 @@ void paintTextModeCaption(const TextLayout &layout, uint16_t colour, uint16_t ba
   }
 }
 
-// Status colour fills the screen, the status name sits at the top, the caption in the middle.
-void drawTextScene(Status status, Language language, const String &caption) {
+// A line with thickness, stacked in both axes so a diagonal stays as thick as a straight one.
+// Only ever used for the badge, which is drawn once per repaint rather than per frame.
+void badgeLine(int16_t x0, int16_t y0, int16_t x1, int16_t y1, int16_t weight, uint16_t colour) {
+  const int16_t half = weight / 2;
+  for (int16_t ox = -half; ox <= half; ++ox) {
+    for (int16_t oy = -half; oy <= half; ++oy) {
+      tft.drawLine(x0 + ox, y0 + oy, x1 + ox, y1 + oy, colour);
+    }
+  }
+}
+
+void badgeRing(int16_t cx, int16_t cy, int16_t r, int16_t weight, uint16_t colour) {
+  for (int16_t i = 0; i < weight; ++i) tft.drawCircle(cx, cy, r - i, colour);
+}
+
+// The Teams-style presence badge: a filled disc with the glyph knocked out of it.
+//
+// Inverted relative to Teams and to the tray icon, and it has to be: in text mode the background
+// is already the status colour, so a status-coloured disc would be invisible. The disc therefore
+// takes the caption's own colour and the glyph is punched out in the background colour. The
+// glyph shapes themselves are the same vocabulary as make_icon() in pc_app/tray.py, scaled to r.
+void drawStatusBadge(Status status, int16_t cx, int16_t cy, int16_t r, uint16_t disc,
+                     uint16_t glyph) {
+  tft.fillCircle(cx, cy, r, disc);
+  const int16_t thick = max<int16_t>(2, r * 21 / 100);
+
+  switch (status) {
+    case Status::Available:  // tick
+      badgeLine(cx - r * 43 / 100, cy + r * 4 / 100, cx - r * 11 / 100, cy + r * 39 / 100, thick,
+                glyph);
+      badgeLine(cx - r * 11 / 100, cy + r * 39 / 100, cx + r * 46 / 100, cy - r * 36 / 100, thick,
+                glyph);
+      break;
+    case Status::Dnd:  // minus
+      tft.fillRoundRect(cx - r / 2, cy - max<int16_t>(2, r * 14 / 100), r,
+                        2 * max<int16_t>(2, r * 14 / 100), 2, glyph);
+      break;
+    case Status::InMeeting:  // play triangle
+      tft.fillTriangle(cx - r * 21 / 100, cy - r * 43 / 100, cx - r * 21 / 100,
+                       cy + r * 43 / 100, cx + r / 2, cy, glyph);
+      break;
+    case Status::Busy:  // solid dot
+      tft.fillCircle(cx, cy, r * 36 / 100, glyph);
+      break;
+    case Status::Away:
+    case Status::Brb: {  // clock
+      const int16_t face = r / 2;
+      badgeRing(cx, cy, face, max<int16_t>(2, r * 12 / 100), glyph);
+      badgeLine(cx, cy, cx, cy - face * 3 / 4, max<int16_t>(2, r * 12 / 100), glyph);
+      badgeLine(cx, cy, cx + face * 3 / 5, cy, max<int16_t>(2, r * 12 / 100), glyph);
+      break;
+    }
+    case Status::Offline:  // cross
+      badgeLine(cx - r * 36 / 100, cy - r * 36 / 100, cx + r * 36 / 100, cy + r * 36 / 100, thick,
+                glyph);
+      badgeLine(cx + r * 36 / 100, cy - r * 36 / 100, cx - r * 36 / 100, cy + r * 36 / 100, thick,
+                glyph);
+      break;
+    default:  // Unknown / Disconnected: a hollow ring
+      badgeRing(cx, cy, r * 43 / 100, max<int16_t>(2, r * 18 / 100), glyph);
+      break;
+  }
+}
+
+// Status colour fills the screen, the presence badge sits at the top, the caption in the middle.
+void drawTextScene(Status status, const String &caption) {
   const StatusTheme &theme = themeFor(status);
   const uint16_t fg = contrastOn(theme.colour);
 
   tft.fillScreen(theme.colour);
 
-  // Status name, with a rule under it to separate it from the caption.
-  tft.setTextDatum(MC_DATUM);
-  tft.setTextColor(fg, theme.colour);
-  const char *label = labelFor(status, language);
-  const uint8_t labelFont = tft.textWidth(label, 4) <= tft.width() - 16 ? 4 : 2;
-  tft.drawString(label, tft.width() / 2, 24, labelFont);
-  tft.drawFastHLine(24, 44, tft.width() - 48, fg);
+  // The badge replaces the status name: the colour already says which status this is, so a word
+  // for it was redundant, and a glyph reads at a glance from across the room.
+  drawStatusBadge(status, tft.width() / 2, kTextBadgeCy, kTextBadgeR, fg, theme.colour);
+  tft.drawFastHLine(24, kTextRuleY, tft.width() - 48, fg);
 
   const TextLayout layout = layoutTextMode(caption);
   if (gTransitionMs == 0) {
@@ -205,7 +302,7 @@ void transitionTextCaption(Status status, const String &oldCaption, const String
     }
   }
   // Clear the old text's rows before the new layout, which may use a different line count.
-  const int16_t clearTop = min(previous.top, static_cast<int16_t>(52));
+  const int16_t clearTop = min(previous.top, kTextTop);
   tft.fillRect(0, clearTop, tft.width(), tft.height() - clearTop, bg);
 
   const TextLayout next = layoutTextMode(newCaption);
@@ -221,25 +318,56 @@ void transitionTextCaption(Status status, const String &oldCaption, const String
 
 // -- image mode composition ---------------------------------------------------------------
 
-void drawCaptionBand(const String &caption, bool fade) {
-  if (caption.isEmpty()) return;
-
-  String lines[kCaptionMaxLines];
+// Lay the caption band out and fill it. Shared by the blocking fade in image mode and the
+// stepped one in mascot mode.
+//
+// Two things happen here. The font is chosen by trying the big one first and falling back to the
+// small one only when the caption would not fit in its line budget. And the fill covers the
+// previous band as well as the new one, so a caption that needs fewer lines than its predecessor
+// does not leave the tail of it stranded above.
+BandLayout layoutCaptionBand(const String &caption) {
+  BandLayout band;
+  if (caption.isEmpty()) return band;
   const int16_t maxWidth = tft.width() - 2 * kCaptionPadX;
-  const uint8_t count = wrapText(caption, lines, kCaptionMaxLines, maxWidth, kCaptionFont);
-  if (count == 0) return;
 
-  const int16_t bandH = count * kCaptionLineH + 2 * kCaptionPadY;
-  const int16_t top = tft.height() - bandH;
-  tft.fillRect(0, top, tft.width(), bandH, kCaptionBg);
+  // Wrapping into more slots than the big font is allowed is how we tell "fits" from "would be
+  // truncated" -- wrapText silently drops anything past the limit it is given.
+  String probe[kCaptionMaxLines];
+  const uint8_t big = wrapText(caption, probe, kCaptionMaxLines, maxWidth, kCaptionFontBig);
+  if (big > 0 && big <= kCaptionLinesBig) {
+    band.font = kCaptionFontBig;
+    band.lineH = kCaptionLineHBig;
+    band.count = big;
+    for (uint8_t i = 0; i < big; ++i) band.lines[i] = probe[i];
+  } else {
+    band.font = kCaptionFontSmall;
+    band.lineH = kCaptionLineHSmall;
+    band.count = wrapText(caption, band.lines, kCaptionLinesSmall, maxWidth, kCaptionFontSmall);
+  }
+  if (band.count == 0) return band;
+
+  band.top = tft.height() - (band.count * band.lineH + 2 * kCaptionPadY);
+  const int16_t clearTop = (gBandTop >= 0 && gBandTop < band.top) ? gBandTop : band.top;
+  tft.fillRect(0, clearTop, tft.width(), tft.height() - clearTop, kCaptionBg);
+  gBandTop = band.top;
+  return band;
+}
+
+// Called by anything that repaints the whole screen: whatever was behind the band is gone, so
+// the next caption has nothing of its predecessor to cover up.
+void forgetCaptionBand() { gBandTop = -1; }
+
+void drawCaptionBand(const String &caption, bool fade) {
+  const BandLayout band = layoutCaptionBand(caption);
+  if (band.count == 0) return;
 
   if (!fade || gTransitionMs == 0) {
-    paintCaptionText(lines, count, top, kCaptionFg);
+    paintCaptionText(band, kCaptionFg);
     return;
   }
   const uint16_t perStep = gTransitionMs / 2 / kFadeSteps;
   for (uint8_t step = 1; step <= kFadeSteps; ++step) {
-    paintCaptionText(lines, count, top, lerpColour(kCaptionBg, kCaptionFg, step, kFadeSteps));
+    paintCaptionText(band, lerpColour(kCaptionBg, kCaptionFg, step, kFadeSteps));
     if (perStep) delay(perStep);
   }
 }
@@ -250,7 +378,7 @@ void drawFallbackScene(Status status, Language language) {
   const StatusTheme &theme = themeFor(status);
   const int16_t w = tft.width();
   const int16_t h = tft.height();
-  const int16_t safe = h - (kCaptionMaxLines * kCaptionLineH + 2 * kCaptionPadY);
+  const int16_t safe = h - kCaptionReserve;
 
   tft.fillScreen(theme.colour);
 
@@ -274,6 +402,48 @@ void drawFallbackScene(Status status, Language language) {
   }
 }
 
+// Start a caption fade that advances from tick() rather than from a delay() loop.
+void beginSteppedCaption(const String &caption) {
+  gCaptionFade.active = false;
+  gCaptionFade.band = layoutCaptionBand(caption);
+  if (gCaptionFade.band.count == 0) return;
+
+  if (gTransitionMs == 0) {
+    paintCaptionText(gCaptionFade.band, kCaptionFg);
+    return;
+  }
+  gCaptionFade.active = true;
+  gCaptionFade.step = 0;
+  gCaptionFade.perStepMs = gTransitionMs / 2 / kFadeSteps;
+  gCaptionFade.nextMs = millis();
+}
+
+// One step of that fade. Returns true while there is more to do.
+bool stepCaption(uint32_t nowMs) {
+  if (!gCaptionFade.active || nowMs < gCaptionFade.nextMs) return gCaptionFade.active;
+  gCaptionFade.step++;
+  paintCaptionText(gCaptionFade.band,
+                   lerpColour(kCaptionBg, kCaptionFg, gCaptionFade.step, kFadeSteps));
+  if (gCaptionFade.step >= kFadeSteps) {
+    gCaptionFade.active = false;
+    return false;
+  }
+  gCaptionFade.nextMs = nowMs + gCaptionFade.perStepMs;
+  return true;
+}
+
+// Mascot mode: the character on a dimmed status colour, with the caption band below it.
+void drawMascotScene(Status status, Tone tone, const String &caption, bool captionOnly) {
+  const uint32_t now = millis();
+  if (!captionOnly) {
+    tft.fillRect(0, 0, tft.width(), tft.height(), mascot::backdrop(status));
+    forgetCaptionBand();
+    mascot::reset();
+    mascot::render(status, tone, now);
+  }
+  beginSteppedCaption(caption);
+}
+
 void drawImageScene(Status status, Language language, const String &memePath,
                     const String &caption, bool fadeCaption) {
   bool drew = false;
@@ -284,6 +454,8 @@ void drawImageScene(Status status, Language language, const String &memePath,
     if (!drew) Serial.printf("LOG:jpeg decode failed for %s\n", memePath.c_str());
   }
   if (!drew) drawFallbackScene(status, language);
+  // The meme (or the fallback scene) just covered the whole screen, the old band included.
+  forgetCaptionBand();
   drawCaptionBand(caption, fadeCaption);
 }
 
@@ -295,6 +467,9 @@ void begin(Orientation orientation, DisplayMode displayMode) {
   gMode = displayMode;
   tft.setRotation(rotationFor(orientation));
   tft.fillScreen(TFT_BLACK);
+
+  mascot::begin(&tft);
+  mascot::layout(tft.width(), tft.height(), kCaptionReserve);
 
   ledcSetup(kBacklightChannel, kBacklightFreq, kBacklightBits);
   ledcAttachPin(TFT_BL, kBacklightChannel);
@@ -313,6 +488,8 @@ void setOrientation(Orientation newOrientation) {
   gOrientation = newOrientation;
   tft.setRotation(rotationFor(newOrientation));
   tft.fillScreen(TFT_BLACK);
+  // The panel swapped its axes, so the character needs a new box and a new sprite.
+  mascot::layout(tft.width(), tft.height(), kCaptionReserve);
   invalidate();
   Serial.printf("LOG:panel %dx%d\n", tft.width(), tft.height());
 }
@@ -335,6 +512,17 @@ uint16_t transitionMs() { return gTransitionMs; }
 void invalidate() {
   gHaveFrame = false;
   gLastCaption = "";
+  gCaptionFade.active = false;
+  forgetCaptionBand();
+  mascot::reset();
+}
+
+void tick(Status status, Tone tone) {
+  if (gMode != DisplayMode::Mascot || !gHaveFrame) return;
+  const uint32_t now = millis();
+  // The caption fade gets priority: it is short, and it only touches the band.
+  if (stepCaption(now)) return;
+  if (mascot::due(now)) mascot::render(status, tone, now);
 }
 
 int16_t width() { return tft.width(); }
@@ -351,16 +539,19 @@ void setBrightness(uint8_t percent) {
 
 uint8_t brightness() { return gBrightness; }
 
-void showFrame(Status status, Language language, const String &memePath, const String &caption) {
+void showFrame(Status status, Language language, Tone tone, const String &memePath,
+               const String &caption) {
   // A caption-only change keeps the background and cross-fades the text in place; anything else
   // is a full repaint.
   const bool captionOnly = gHaveFrame && status == gLastStatus;
 
-  if (gMode == DisplayMode::Text) {
+  if (gMode == DisplayMode::Mascot) {
+    drawMascotScene(status, tone, caption, captionOnly);
+  } else if (gMode == DisplayMode::Text) {
     if (captionOnly) {
       transitionTextCaption(status, gLastCaption, caption);
     } else {
-      drawTextScene(status, language, caption);
+      drawTextScene(status, caption);
     }
   } else {
     // In image mode the meme itself changes too, so the picture is always redrawn; only the
@@ -378,8 +569,15 @@ void showClock(const String &hhmm) {
   gClock = hhmm;
   if (hhmm.isEmpty()) return;
   constexpr int16_t kW = 46, kH = 18;
-  const uint16_t bg = gMode == DisplayMode::Text ? themeFor(gLastStatus).colour : TFT_BLACK;
-  const uint16_t fg = gMode == DisplayMode::Text ? contrastOn(bg) : TFT_WHITE;
+  // Each mode has its own thing behind the clock: the status colour in text mode, the dimmed
+  // backdrop in mascot mode, and the meme (which we cover with black) in image mode.
+  uint16_t bg = TFT_BLACK;
+  if (gMode == DisplayMode::Text) {
+    bg = themeFor(gLastStatus).colour;
+  } else if (gMode == DisplayMode::Mascot) {
+    bg = mascot::backdrop(gLastStatus);
+  }
+  const uint16_t fg = bg == TFT_BLACK ? TFT_WHITE : contrastOn(bg);
   tft.fillRect(tft.width() - kW - 4, 4, kW, kH, bg);
   tft.setTextDatum(TR_DATUM);
   tft.setTextColor(fg, bg);

@@ -40,9 +40,28 @@ Note that Teams never writes "in a meeting" as an availability value — it writ
 | `TIME:HH:MM` | Optional clock in the corner. Not sent if the clock is disabled. |
 | `LANG:<code>` | Caption language: `en` or `it`. Persisted in NVS. |
 | `ORIENT:<name>` | Screen orientation: `landscape` (or `land`) / `portrait` (or `port`). Persisted in NVS. |
-| `MODE:<name>` | `image` (meme + caption band) or `text` (caption alone on the status colour). Persisted in NVS. |
+| `MODE:<name>` | `mascot` (the animated character), `image` (meme + caption band) or `text` (caption alone on the status colour). Persisted in NVS. |
+| `TONE:<name>` | `normal` / `sarcastic` / `retriever`. Only picks the mascot's expression -- see "Who owns the words" below. Persisted in NVS. |
+| `CAPTION:<text>` | The phrase to display now. Takes precedence over the board's own bank until the PC goes quiet. |
 | `TRANSITION:<ms>` | Cross-fade duration for a caption change, 0-2000. `0` switches instantly. Persisted in NVS. |
 | `PING` | Liveness / port-detection probe. |
+
+## Who owns the words
+
+The PC picks the phrase and sends it with `CAPTION:`; the board displays what it is told. That is
+what lets the tray app's editor add a phrase without a rebuild, an `uploadfs` or PlatformIO --
+and it is why `TONE:` does not carry any text. The tone changes which bank the PC draws from, and
+the board needs to know it only so the mascot can pull the matching face.
+
+The caption bank flashed into LittleFS is the fallback for when no PC is attached. Rules:
+
+- A `CAPTION:` line replaces whatever is on screen and keeps the board from picking its own.
+- On the PC timeout the stored caption is dropped, so `DISCONNECTED` shows the board's own bank
+  rather than freezing on the last thing the PC said.
+- While a PC caption is in force the board stops rotating captions -- the PC runs that timer, on
+  `ROTATE:` seconds. In `image` mode the board still rotates the *meme*.
+- Only the `normal` tone is flashed (`FLASHED_TONE` in `tools/build_memes.py`). A fallback should
+  be the plain-spoken one, and the other tones never need to reach the device.
 
 `LANG:` and `ORIENT:` are re-sent on every connect. The board ignores a value it is already using,
 so this costs nothing; an unrecognised value is rejected with a `LOG:` line and changes nothing.
@@ -59,6 +78,7 @@ orientation and it falls back to the built-in drawn scene.
 | `READY:<version>` | Sent once on boot, e.g. `READY:1.0.0`. |
 | `PONG` | Reply to `PING`. Used by `serial_link.find_port()` to identify the right COM port. |
 | `LOG:<text>` | Free-form diagnostics. The PC app logs these at debug level. |
+| `EVT:NEXT` | The screen was tapped. The board picks a new meme itself and this asks the PC for a fresh phrase. |
 
 ## Port detection
 
@@ -86,13 +106,31 @@ BRIGHT:20
 ROTATE:0
 LANG:it
 ORIENT:portrait
+MODE:mascot
+TONE:sarcastic
+CAPTION:Technically available. Emotionally, no.
 MODE:text
 TRANSITION:0
 ```
 
-In `text` mode no meme is read at all: the screen is filled with the status colour, the status
-name goes at the top, and the caption sits in the middle in black or white -- whichever reads
-better on that colour. A caption change cross-fades by interpolating the text colour towards the
+In `mascot` mode the screen is filled with the status colour dimmed to about a fifth, the
+character is composed into a sprite and pushed at roughly 25 fps, and the caption sits in the
+same band image mode uses. The character is drawn from shapes rather than flashed as art: a full
+screen animation frame would be ~150 KB as a bitmap and ~100 ms to decode as a JPEG, and this
+board has neither the flash nor the PSRAM for that. One consequence is that an expression costs a
+few bytes (`firmware/src/mascot_table.h`) instead of an asset, so all 27 status/tone combinations
+are free.
+
+Set `TONE:sarcastic` and then `STATUS:AVAILABLE` to see the point of the feature: the presence
+badge in the corner stays green and truthful while the face declines to be enthusiastic about it.
+
+The caption fade in mascot mode is stepped from the animation tick rather than run in a blocking
+`delay()` loop, because blocking would freeze the character for the length of the transition.
+
+In `text` mode no meme is read at all: the screen is filled with the status colour, a presence
+badge goes at the top, and the caption sits in the middle in black or white -- whichever reads
+better on that colour. The badge is a disc in that same text colour with the status glyph punched
+out of it, because a status-coloured disc on a status-coloured background would show nothing. A caption change cross-fades by interpolating the text colour towards the
 background and back, which needs no framebuffer and so costs nothing but time.
 
 Settings survive a power cycle: the board stores brightness, rotation, language and orientation

@@ -22,9 +22,16 @@ LANGUAGE_NAMES = {"en": "English", "it": "Italiano"}
 ORIENTATIONS = ("landscape", "portrait")
 DEFAULT_ORIENTATION = "portrait"
 
-#: Must match kDisplayModeNames in firmware/src/status.cpp.
-DISPLAY_MODES = ("image", "text")
-DEFAULT_DISPLAY_MODE = "image"
+#: Must match kDisplayModeNames in firmware/src/status.cpp. Order matches the DisplayMode enum,
+#: which is append-only so that a value already stored in the board's NVS keeps its meaning.
+DISPLAY_MODES = ("image", "text", "mascot")
+DEFAULT_DISPLAY_MODE = "mascot"
+
+#: How the phrases are worded. Unlike everything else here this is a PC-side concept: the device
+#: is told the tone only so the mascot can pull the matching face. Must match kToneNames in
+#: firmware/src/status.cpp, and the folder names under captions/<lang>/.
+TONES = ("normal", "sarcastic", "retriever")
+DEFAULT_TONE = "normal"
 
 _STATUS_LABELS: dict[str, dict[Status, str]] = {
     "en": {
@@ -63,6 +70,12 @@ _MENU: dict[str, dict[str, str]] = {
         "display": "Display",
         "image": "Image + text",
         "text": "Text only",
+        "mascot": "Mascot",
+        "tone": "Tone",
+        "normal": "Normal",
+        "sarcastic": "Sarcasm",
+        "retriever": "Golden Retriever",
+        "settings": "Messages and settings...",
         "transition": "Fade between captions",
         "reconnect": "Reconnect",
         "open_config": "Open config folder",
@@ -83,6 +96,12 @@ _MENU: dict[str, dict[str, str]] = {
         "display": "Visualizzazione",
         "image": "Immagine + testo",
         "text": "Solo testo",
+        "mascot": "Mascotte",
+        "tone": "Tono",
+        "normal": "Normale",
+        "sarcastic": "Sarcasmo",
+        "retriever": "Golden Retriever",
+        "settings": "Messaggi e impostazioni...",
         "transition": "Dissolvenza tra le frasi",
         "reconnect": "Riconnetti",
         "open_config": "Apri cartella configurazione",
@@ -100,6 +119,13 @@ def normalise(language: str | None) -> str:
     if language and language.lower() in LANGUAGES:
         return language.lower()
     return DEFAULT_LANGUAGE
+
+
+def normalise_tone(tone: str | None) -> str:
+    """Fall back to the default for a tone we have no phrases or face for."""
+    if tone and tone.lower() in TONES:
+        return tone.lower()
+    return DEFAULT_TONE
 
 
 def status_label(status: Status, language: str = DEFAULT_LANGUAGE) -> str:

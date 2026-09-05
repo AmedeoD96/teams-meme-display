@@ -32,7 +32,10 @@ const char *const kOrientationTokens[kOrientationCount][2] = {
     {"PORTRAIT", "PORT"},
 };
 
-const char *const kDisplayModeNames[kDisplayModeCount] = {"image", "text"};
+const char *const kDisplayModeNames[kDisplayModeCount] = {"image", "text", "mascot"};
+
+// Must match TONES in pc_app/i18n.py and the folder names under captions/<lang>/.
+const char *const kToneNames[kToneCount] = {"normal", "sarcastic", "retriever"};
 
 }  // namespace
 
@@ -81,6 +84,21 @@ bool displayModeFromToken(const String &token, DisplayMode *out) {
     }
   }
   return false;
+}
+
+bool toneFromToken(const String &token, Tone *out) {
+  for (uint8_t i = 0; i < kToneCount; ++i) {
+    if (token.equalsIgnoreCase(kToneNames[i])) {
+      *out = static_cast<Tone>(i);
+      return true;
+    }
+  }
+  return false;
+}
+
+const char *toneName(Tone tone) {
+  const uint8_t index = static_cast<uint8_t>(tone);
+  return kToneNames[index < kToneCount ? index : 0];
 }
 
 const char *displayModeName(DisplayMode mode) {

@@ -29,10 +29,21 @@ enum class Orientation : uint8_t {
   Count,
 };
 
-//: How a frame is composed: a meme with a caption band, or the caption alone on the status colour.
+//: How a frame is composed: a meme with a caption band, the caption alone on the status colour,
+//: or the animated mascot. Appended to, never reordered -- the value is stored in NVS.
 enum class DisplayMode : uint8_t {
   Image = 0,
   Text,
+  Mascot,
+  Count,
+};
+
+//: How the phrases are worded. The PC chooses the words itself and pushes them with CAPTION:, so
+//: the only thing the board does with this is pick the mascot's expression.
+enum class Tone : uint8_t {
+  Normal = 0,
+  Sarcastic,
+  Retriever,
   Count,
 };
 
@@ -40,6 +51,7 @@ constexpr uint8_t kStatusCount = static_cast<uint8_t>(Status::Count);
 constexpr uint8_t kLanguageCount = static_cast<uint8_t>(Language::Count);
 constexpr uint8_t kOrientationCount = static_cast<uint8_t>(Orientation::Count);
 constexpr uint8_t kDisplayModeCount = static_cast<uint8_t>(DisplayMode::Count);
+constexpr uint8_t kToneCount = static_cast<uint8_t>(Tone::Count);
 
 struct StatusTheme {
   const char *token;   // wire token, e.g. "IN_MEETING"
@@ -55,6 +67,7 @@ bool statusFromToken(const String &token, Status *out);
 bool languageFromToken(const String &token, Language *out);
 bool orientationFromToken(const String &token, Orientation *out);
 bool displayModeFromToken(const String &token, DisplayMode *out);
+bool toneFromToken(const String &token, Tone *out);
 
 inline const char *statusToken(Status status) { return themeFor(status).token; }
 
@@ -66,5 +79,8 @@ const char *languageCode(Language language);
 // "land" / "port" -- the meme folder name on the filesystem.
 const char *orientationFolder(Orientation orientation);
 
-// "image" / "text".
+// "image" / "text" / "mascot".
 const char *displayModeName(DisplayMode mode);
+
+// "normal" / "sarcastic" / "retriever".
+const char *toneName(Tone tone);

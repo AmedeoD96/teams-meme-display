@@ -23,15 +23,36 @@ from __future__ import annotations
 import argparse
 import shutil
 import sys
-import unicodedata
 from pathlib import Path
 
 try:
-    from PIL import Image, ImageDraw, ImageFont
+    from PIL import Image
 except ImportError:  # pragma: no cover
     sys.exit("Pillow is required: pip install -r requirements-dev.txt")
 
 REPO = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(REPO))
+
+# The text folding and the frame renderers are shared with the tray app and the GUI, which is why
+# they live under pc_app/ rather than here -- tools/ is not bundled into the packaged .exe.
+#
+# CAPTION_MAX_LINES, TEXT_MAX_LINES, STATUS_LABELS, contrast_on, status_colour and wrap_caption
+# are not used below: they are re-exported so that this module stays the one place the tests and
+# any existing scripts have to import the asset-pipeline vocabulary from.
+from pc_app.render import (  # noqa: E402
+    CAPTION_MAX_LINES,
+    STATUS_LABELS,
+    TEXT_MAX_LINES,
+    contrast_on,
+    render_mascot_preview,
+    render_preview,
+    render_text_preview,
+    status_colour,
+    wrap_caption,
+)
+from pc_app.i18n import TONES  # noqa: E402
+from pc_app.text import to_display_ascii  # noqa: E402
+
 MEME_SRC = REPO / "memes"
 CAPTION_SRC = REPO / "captions"
 DATA_OUT = REPO / "firmware" / "data"
@@ -53,6 +74,11 @@ STATUSES = (
 #: Caption languages. Must match kLanguages in firmware/src/status.cpp.
 LANGUAGES = ("en", "it")
 
+#: Only this tone is flashed. The tray app owns phrasing at runtime and pushes it over the wire
+#: (CAPTION: in docs/PROTOCOL.md), so the on-device bank exists purely as the fallback for when no
+#: PC is attached -- and a fallback should be the plain-spoken one. See pc_app/phrases.py.
+FLASHED_TONE = "normal"
+
 #: Screen orientations: on-device folder -> (width, height). Must match firmware/src/display.cpp.
 ORIENTATIONS = {
     "land": (320, 240),
@@ -66,22 +92,6 @@ ORIENTATION_ALIASES = {
     "port": "port",
 }
 
-# Caption band, kept in sync with the kCaption* constants in firmware/src/display.h.
-CAPTION_PAD_X = 6
-CAPTION_PAD_Y = 6
-CAPTION_LINE_H = 16
-CAPTION_MAX_LINES = 3
-#: Vertical space the caption band can take, so scene art can stay clear of it.
-CAPTION_RESERVE = CAPTION_MAX_LINES * CAPTION_LINE_H + 2 * CAPTION_PAD_Y
-
-# Text-mode layout, mirroring layoutTextMode()/drawTextScene() in firmware/src/display.cpp.
-TEXT_PAD_X = 12
-TEXT_LABEL_Y = 24
-TEXT_RULE_Y = 44
-TEXT_TOP = 52
-TEXT_LINE_H = 26
-TEXT_MAX_LINES = 8
-
 SOURCE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif"}
 
 #: Default 4MB ESP32 partition table gives ~1.5MB to the filesystem. Leave headroom for LittleFS
@@ -89,101 +99,6 @@ SOURCE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif"}
 FS_BUDGET_BYTES = 1_400_000
 DEFAULT_MAX_BYTES = 24_000
 MIN_QUALITY = 40
-
-#: The display font is ASCII only (TFT_eSPI font 2 carries 96 glyphs, 32-126), so accented
-#: letters are folded to the apostrophe form Italian has always used on ASCII-only systems.
-ACCENT_MAP = {
-    "à": "a'", "è": "e'", "é": "e'", "ì": "i'", "ò": "o'", "ó": "o'", "ù": "u'",
-    "À": "A'", "È": "E'", "É": "E'", "Ì": "I'", "Ò": "O'", "Ó": "O'", "Ù": "U'",
-    "‘": "'", "’": "'", "“": '"', "”": '"', "–": "-", "—": "-", "…": "...",
-}
-
-
-STATUS_LABELS = {
-    "en": {
-        "available": "AVAILABLE", "busy": "BUSY", "in_meeting": "IN A MEETING",
-        "dnd": "DO NOT DISTURB", "away": "AWAY", "brb": "BE RIGHT BACK",
-        "offline": "OFFLINE", "unknown": "UNKNOWN", "disconnected": "NO PC",
-    },
-    "it": {
-        "available": "DISPONIBILE", "busy": "OCCUPATO", "in_meeting": "IN RIUNIONE",
-        "dnd": "NON DISTURBARE", "away": "ASSENTE", "brb": "TORNO SUBITO",
-        "offline": "NON IN LINEA", "unknown": "SCONOSCIUTO", "disconnected": "NESSUN PC",
-    },
-}
-
-
-def status_colour(status: str) -> tuple[int, int, int]:
-    """Fallback background, matching the themes in firmware/src/status.cpp."""
-    return {
-        "available": (0x2E, 0xCC, 0x71),
-        "busy": (0xE7, 0x4C, 0x3C),
-        "in_meeting": (0x8E, 0x44, 0xAD),
-        "dnd": (0xB0, 0x3A, 0x2E),
-        "away": (0xF3, 0x9C, 0x12),
-        "brb": (0xE6, 0x7E, 0x22),
-        "offline": (0x7F, 0x8C, 0x8D),
-        "unknown": (0x56, 0x65, 0x73),
-        "disconnected": (0x34, 0x49, 0x5E),
-    }[status]
-
-
-def to_display_ascii(text: str) -> tuple[str, list[str]]:
-    """Fold text to what the display font can actually render.
-
-    Returns the folded text plus any characters that had to be dropped, so the build can warn
-    rather than silently printing question marks on the device.
-    """
-    out: list[str] = []
-    lost: list[str] = []
-    for char in text:
-        if ord(char) < 128:
-            out.append(char)
-        elif char in ACCENT_MAP:
-            out.append(ACCENT_MAP[char])
-        else:
-            # Last resort: strip the diacritic (é -> e) if that yields something printable.
-            stripped = "".join(
-                c for c in unicodedata.normalize("NFD", char) if not unicodedata.combining(c)
-            )
-            if stripped and all(ord(c) < 128 for c in stripped):
-                out.append(stripped)
-            else:
-                lost.append(char)
-                out.append("?")
-    return "".join(out), lost
-
-
-def wrap_caption(text: str, measure, width: int, max_lines: int = CAPTION_MAX_LINES) -> list[str]:
-    """Greedy word wrap by measured pixel width, mirroring wrapCaption() in display.cpp.
-
-    Width rather than character count: TFT_eSPI font 2 is proportional, so counting characters
-    would wrap in the wrong place. The preview font is not byte-identical to the device font, so
-    a line may break one word differently -- close enough to judge layout, not a pixel contract.
-    """
-    max_width = width - 2 * CAPTION_PAD_X
-    lines: list[str] = []
-    current = ""
-    for word in text.split():
-        candidate = f"{current} {word}".strip()
-        if measure(candidate) <= max_width:
-            current = candidate
-            continue
-        if current:
-            lines.append(current)
-            current = ""
-        # A single word too wide for the line is hard-broken rather than left to overflow.
-        while measure(word) > max_width and len(word) > 1:
-            fit = len(word)
-            while fit > 1 and measure(word[:fit]) > max_width:
-                fit -= 1
-            lines.append(word[:fit])
-            word = word[fit:]
-        current = word
-    if current:
-        lines.append(current)
-    return lines[:max_lines]
-
 
 def fit_image(image: Image.Image, mode: str, size: tuple[int, int]) -> Image.Image:
     """Resize to exactly *size*, either cropping to fill or letterboxing to fit."""
@@ -231,87 +146,6 @@ def encode_jpeg(image: Image.Image, destination: Path, max_bytes: int) -> int:
         if size <= max_bytes or quality <= MIN_QUALITY:
             return size
         quality -= 5
-
-
-def _preview_font(size: int = 14):
-    """A font approximating the device's TFT_eSPI fonts (font 2 ~14px, font 4 ~20px)."""
-    for candidate in (r"C:\Windows\Fonts\consola.ttf", r"C:\Windows\Fonts\arial.ttf"):
-        try:
-            return ImageFont.truetype(candidate, size)
-        except OSError:
-            continue
-    try:
-        return ImageFont.load_default(size=size)
-    except TypeError:  # Pillow < 10.1
-        return ImageFont.load_default()
-
-
-def contrast_on(rgb: tuple[int, int, int]) -> tuple[int, int, int]:
-    """Black or white, whichever reads better on *rgb*. Mirrors contrastOn() in display.cpp."""
-    luma = (rgb[0] * 299 + rgb[1] * 587 + rgb[2] * 114) // 1000
-    return (0, 0, 0) if luma > 140 else (255, 255, 255)
-
-
-def render_text_preview(
-    status: str, caption: str, size: tuple[int, int], label: str, destination: Path
-) -> None:
-    """Render text mode: the caption alone on the status colour, no image involved.
-
-    Mirrors drawTextScene()/layoutTextMode() in firmware/src/display.cpp.
-    """
-    width, height = size
-    background = status_colour(status)
-    foreground = contrast_on(background)
-
-    frame = Image.new("RGB", size, background)
-    draw = ImageDraw.Draw(frame)
-    font = _preview_font(20)
-
-    draw.text((width // 2, TEXT_LABEL_Y), label, font=font, fill=foreground, anchor="mm")
-    draw.line((24, TEXT_RULE_Y, width - 24, TEXT_RULE_Y), fill=foreground)
-
-    lines = wrap_caption(
-        caption,
-        lambda text: draw.textlength(text, font=font),
-        width - 2 * TEXT_PAD_X + 2 * CAPTION_PAD_X,
-        max_lines=TEXT_MAX_LINES,
-    )
-    top = TEXT_TOP + (height - TEXT_TOP - len(lines) * TEXT_LINE_H) // 2
-    for index, line in enumerate(lines):
-        draw.text(
-            (width // 2, top + index * TEXT_LINE_H + TEXT_LINE_H // 2),
-            line,
-            font=font,
-            fill=foreground,
-            anchor="mm",
-        )
-
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    frame.save(destination, format="PNG")
-
-
-def render_preview(base: Image.Image, caption: str, destination: Path) -> None:
-    """Compose meme + caption band exactly as the device will, for eyeballing without hardware."""
-    frame = base.copy().convert("RGB")
-    width, height = frame.size
-    draw = ImageDraw.Draw(frame)
-    font = _preview_font()
-    lines = wrap_caption(caption, lambda text: draw.textlength(text, font=font), width)
-    if not lines:
-        return
-
-    # Solid, not translucent: the device fills the band with TFT_BLACK.
-    band_h = len(lines) * CAPTION_LINE_H + 2 * CAPTION_PAD_Y
-    top = height - band_h
-    draw.rectangle((0, top, width, height), fill=(0, 0, 0))
-
-    y = top + CAPTION_PAD_Y
-    for line in lines:
-        draw.text((CAPTION_PAD_X, y), line, font=font, fill=(255, 255, 255))
-        y += CAPTION_LINE_H
-
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    frame.save(destination, format="PNG")
 
 
 def source_orientation(path: Path) -> str | None:
@@ -376,7 +210,7 @@ def build(args: argparse.Namespace) -> int:
                 total += encode_jpeg(fitted, out_dir / name, args.max_bytes)
                 names.append(name)
 
-                if args.preview and args.preview_mode in ("image", "both"):
+                if args.preview and args.preview_mode in ("image", "all"):
                     caption = _first_caption(status, args.preview_lang)
                     render_preview(
                         fitted,
@@ -394,18 +228,28 @@ def build(args: argparse.Namespace) -> int:
                 )
 
         # Text mode ignores memes entirely, so it gets one preview per status.
-        if args.preview and args.preview_mode in ("text", "both"):
+        if args.preview and args.preview_mode in ("text", "all"):
             for status in STATUSES:
                 render_text_preview(
                     status,
                     _first_caption(status, args.preview_lang),
                     size,
-                    STATUS_LABELS[args.preview_lang][status],
                     PREVIEW_OUT / f"{orientation}_text_{status}.png",
                 )
 
+        # Mascot mode draws the character rather than a meme, so it too gets one per status.
+        if args.preview and args.preview_mode in ("mascot", "all"):
+            for status in STATUSES:
+                render_mascot_preview(
+                    status,
+                    args.preview_tone,
+                    _first_caption(status, args.preview_lang, args.preview_tone),
+                    size,
+                    PREVIEW_OUT / f"{orientation}_mascot_{status}.png",
+                )
+
         # Fallback previews so every status can be reviewed even with no memes at all.
-        if args.preview and args.preview_mode in ("image", "both"):
+        if args.preview and args.preview_mode in ("image", "all"):
             for status in STATUSES:
                 if counts.get((orientation, status)):
                     continue
@@ -424,8 +268,8 @@ def build(args: argparse.Namespace) -> int:
     return 1 if problems or total > FS_BUDGET_BYTES else 0
 
 
-def _first_caption(status: str, language: str) -> str:
-    path = CAPTION_SRC / language / f"{status}.txt"
+def _first_caption(status: str, language: str, tone: str = FLASHED_TONE) -> str:
+    path = CAPTION_SRC / language / tone / f"{status}.txt"
     if not path.exists():
         return status.replace("_", " ").upper()
     for line in path.read_text(encoding="utf-8").splitlines():
@@ -442,9 +286,11 @@ def _copy_captions() -> tuple[int, list[str]]:
         out_dir = DATA_OUT / "captions" / language
         out_dir.mkdir(parents=True, exist_ok=True)
         for status in STATUSES:
-            source = CAPTION_SRC / language / f"{status}.txt"
+            source = CAPTION_SRC / language / FLASHED_TONE / f"{status}.txt"
             if not source.exists():
-                problems.append(f"missing caption bank: captions/{language}/{status}.txt")
+                problems.append(
+                    f"missing caption bank: captions/{language}/{FLASHED_TONE}/{status}.txt"
+                )
                 continue
             lines: list[str] = []
             for raw in source.read_text(encoding="utf-8").splitlines():
@@ -530,9 +376,15 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument(
         "--preview-mode",
-        choices=("image", "text", "both"),
-        default="both",
-        help="which display mode(s) to preview (default: both)",
+        choices=("image", "text", "mascot", "all"),
+        default="all",
+        help="which display mode(s) to preview (default: all)",
+    )
+    parser.add_argument(
+        "--preview-tone",
+        choices=TONES,
+        default="normal",
+        help="tone used for the mascot previews and their captions (default: normal)",
     )
     parser.add_argument("--clean", action="store_true", help="delete the previous build first")
     return build(parser.parse_args(argv))

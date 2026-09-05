@@ -8,8 +8,10 @@ String gBuffer;
 uint32_t gLastCommandMs = 0;
 bool gDiscarding = false;
 
-// Guards against a peer that never sends a newline filling up RAM.
-constexpr size_t kMaxLine = 96;
+// Guards against a peer that never sends a newline filling up RAM. Long enough for the longest
+// CAPTION: the PC will send (MAX_PHRASE_CHARS in pc_app/phrases.py, plus the prefix) with room
+// to spare.
+constexpr size_t kMaxLine = 160;
 
 void dispatch(String line) {
   line.trim();
@@ -74,6 +76,17 @@ void dispatch(String line) {
   } else if (command == "TRANSITION") {
     gLastCommandMs = millis();
     if (gHandlers.onTransition) gHandlers.onTransition(constrain(value.toInt(), 0, 2000));
+  } else if (command == "TONE") {
+    Tone tone;
+    if (!toneFromToken(value, &tone)) {
+      Serial.printf("LOG:unknown tone '%s'\n", value.c_str());
+      return;
+    }
+    gLastCommandMs = millis();
+    if (gHandlers.onTone) gHandlers.onTone(tone);
+  } else if (command == "CAPTION") {
+    gLastCommandMs = millis();
+    if (gHandlers.onCaption) gHandlers.onCaption(value);
   } else {
     Serial.printf("LOG:ignoring '%s'\n", command.c_str());
   }

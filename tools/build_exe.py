@@ -9,7 +9,7 @@ needs the board plugged in.
 
 from __future__ import annotations
 
-import shutil
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -40,8 +40,11 @@ def main() -> int:
         "--specpath", str(REPO / "build"),
         # PyInstaller cannot see pystray's backend, which is chosen at runtime by platform.
         "--hidden-import", "pystray._win32",
-        # Trim the biggest things PyInstaller pulls in that this app never touches.
-        "--exclude-module", "tkinter",
+        # The shipped phrase banks. pc_app/phrases.py seeds phrases.json from these on first run,
+        # so a machine with no repo checkout still starts with something to say.
+        "--add-data", f"{REPO / 'captions'}{os.pathsep}captions",
+        # Trim the biggest things PyInstaller pulls in that this app never touches. tkinter is
+        # NOT among them any more: the settings window is built on it.
         "--exclude-module", "unittest",
         "--exclude-module", "pytest",
         "--exclude-module", "numpy",

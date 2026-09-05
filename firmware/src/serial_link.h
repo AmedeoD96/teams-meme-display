@@ -17,6 +17,10 @@ struct Handlers {
   void (*onOrientation)(Orientation orientation) = nullptr;
   void (*onDisplayMode)(DisplayMode mode) = nullptr;
   void (*onTransition)(uint16_t ms) = nullptr;
+  void (*onTone)(Tone tone) = nullptr;
+  //: The phrase to show. The PC owns the wording (see pc_app/phrases.py); an empty value hands
+  //: the board back to its own flashed caption bank.
+  void (*onCaption)(const String &caption) = nullptr;
 };
 
 void begin(const Handlers &handlers);

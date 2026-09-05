@@ -100,8 +100,28 @@ def build_previews() -> None:
                 source.replace(source.with_name(f"en__{source.name}"))
 
 
+def build_mascot_previews() -> None:
+    """One set of mascot frames per tone, so the tone figure can put them side by side.
+
+    Same trick as build_previews uses for languages: render, then move the frames aside under a
+    prefix before the next run overwrites them.
+    """
+    for tone in ("normal", "sarcastic", "retriever"):
+        subprocess.check_call(
+            [sys.executable, str(REPO / "tools" / "build_memes.py"),
+             "--preview", "--preview-mode", "mascot", "--preview-lang", "it",
+             "--preview-tone", tone],
+            stdout=subprocess.DEVNULL,
+        )
+        for source in sorted(PREVIEW.glob("*_mascot_*.png")):
+            if not source.name.startswith(("land_", "port_")):
+                continue  # already carries a language or tone prefix
+            source.replace(source.with_name(f"{tone}__{source.name}"))
+
+
 def main() -> int:
     build_previews()
+    build_mascot_previews()
 
     # Default look: portrait, Italian, image mode.
     figure(
@@ -111,6 +131,27 @@ def main() -> int:
             (PREVIEW / "port_available_00.png", "Disponibile"),
         ],
         OUT / "portrait-image-mode.png",
+    )
+
+    # Mascot mode: the animated character, drawn by the firmware rather than flashed as art.
+    figure(
+        [
+            (PREVIEW / "normal__port_mascot_in_meeting.png", "In riunione"),
+            (PREVIEW / "normal__port_mascot_dnd.png", "Non disturbare"),
+            (PREVIEW / "normal__port_mascot_available.png", "Disponibile"),
+        ],
+        OUT / "portrait-mascot-mode.png",
+    )
+
+    # The tones: one status, three registers. The badge stays green throughout, which is the
+    # whole point -- the face and the words change, the truth does not.
+    figure(
+        [
+            (PREVIEW / "normal__port_mascot_available.png", "Normale"),
+            (PREVIEW / "sarcastic__port_mascot_available.png", "Sarcasmo"),
+            (PREVIEW / "retriever__port_mascot_available.png", "Golden Retriever"),
+        ],
+        OUT / "tones.png",
     )
 
     # Text-only mode: no images, background is the status colour.

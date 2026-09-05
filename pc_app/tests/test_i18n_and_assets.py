@@ -83,14 +83,23 @@ def test_orientation_names_map_onto_the_device_folders():
         assert build_memes.ORIENTATION_ALIASES[name] in build_memes.ORIENTATIONS
 
 
-def test_every_language_has_a_caption_bank_for_every_status():
+def test_every_language_and_tone_has_a_caption_bank_for_every_status():
+    """Every combination the GUI can select must start with something in it."""
+    from pc_app.i18n import TONES
+
     root = Path(__file__).resolve().parents[2] / "captions"
     for language in LANGUAGES:
-        for status in build_memes.STATUSES:
-            path = root / language / f"{status}.txt"
-            assert path.exists(), path
-            lines = [l for l in path.read_text(encoding="utf-8").splitlines() if l.strip()]
-            assert lines, path
+        for tone in TONES:
+            for status in build_memes.STATUSES:
+                path = root / language / tone / f"{status}.txt"
+                assert path.exists(), path
+                lines = [l for l in path.read_text(encoding="utf-8").splitlines() if l.strip()]
+                assert lines, path
+
+
+def test_only_the_normal_tone_is_flashed_to_the_device():
+    """Tones are a PC-side concept; the board only carries the offline fallback bank."""
+    assert build_memes.FLASHED_TONE == "normal"
 
 
 # -- ASCII folding for the display font ---------------------------------------------------
@@ -124,7 +133,7 @@ def test_all_built_captions_are_display_safe():
     """Every shipped caption must survive folding without losing a character."""
     root = Path(__file__).resolve().parents[2] / "captions"
     for language in LANGUAGES:
-        for path in sorted((root / language).glob("*.txt")):
+        for path in sorted((root / language).glob("*/*.txt")):
             for line in path.read_text(encoding="utf-8").splitlines():
                 if not line.strip():
                     continue
@@ -183,7 +192,7 @@ def test_caption_wrapping_is_narrower_in_portrait():
 def test_display_modes_are_translated_and_defaulted():
     from pc_app.i18n import DISPLAY_MODES
 
-    assert DISPLAY_MODES == ("image", "text")
+    assert DISPLAY_MODES == ("image", "text", "mascot")
     for language in LANGUAGES:
         for mode in DISPLAY_MODES:
             assert tr(mode, language) != mode, (language, mode)
@@ -266,3 +275,131 @@ def test_config_with_a_setting_we_removed_still_loads(tmp_path):
     config = Config.load(path)
     assert config.language == "en"
     assert not hasattr(config, "a_setting_from_the_future")
+
+
+# -- the caption band ------------------------------------------------------------------------
+
+
+def test_a_short_caption_gets_the_big_font():
+    from pc_app.render import CAPTION_FONT_BIG, layout_caption
+
+    lines, size, _, truncated = layout_caption("Sono libero.", 240)
+    assert size == CAPTION_FONT_BIG
+    assert not truncated
+    assert lines == ["Sono libero."]
+
+
+def test_a_long_caption_drops_to_the_small_font_rather_than_being_cut():
+    """The band trades size for completeness; losing half a joke is worse than losing 10px."""
+    from pc_app.render import CAPTION_FONT_SMALL, CAPTION_LINES_BIG, layout_caption
+
+    # The longest phrase we ship. At the big font it would need more than the three lines the
+    # band has room for, so the band steps down a size instead of losing the punchline.
+    long_one = "Inattivo. Come il server di build. Come le mie speranze."
+    lines, size, _, truncated = layout_caption(long_one, 240)
+    assert size == CAPTION_FONT_SMALL, "should have fallen back rather than truncating"
+    assert not truncated
+    assert " ".join(lines) == long_one, "no words lost on the way down to the small font"
+
+    # And it really was too tall for the big font -- otherwise this test proves nothing.
+    from pc_app.render import CAPTION_FONT_BIG, preview_font, wrap_caption
+    from PIL import Image, ImageDraw
+
+    scratch = ImageDraw.Draw(Image.new("RGB", (1, 1)))
+    big = preview_font(CAPTION_FONT_BIG)
+    at_big = wrap_caption(
+        long_one, lambda t: scratch.textlength(t, font=big), 240, max_lines=99
+    )
+    assert len(at_big) > CAPTION_LINES_BIG
+
+
+def test_every_shipped_phrase_fits_the_band_without_being_cut():
+    """The real bar: nothing we ship should reach the panel half-said, in either orientation."""
+    from pc_app.phrases import PhraseBank
+    from pc_app.render import layout_caption
+    from pc_app.text import to_display_ascii
+
+    bank = PhraseBank()
+    for width in (240, 320):
+        for language in LANGUAGES:
+            for tone in ("normal", "sarcastic", "retriever"):
+                for status in build_memes.STATUSES:
+                    for line in bank.lines(language, tone, status):
+                        folded, _ = to_display_ascii(line)
+                        _, _, _, truncated = layout_caption(folded, width)
+                        assert not truncated, (width, language, tone, status, line)
+
+
+def test_a_shorter_caption_sits_lower_than_a_taller_one():
+    """The condition behind the overlap bug: the band is bottom-aligned, so a caption needing
+    fewer lines starts further down and cannot cover what the previous one drew above it.
+    Clearing only the new band is what left a stale line on screen."""
+    from pc_app.render import CAPTION_PAD_Y, layout_caption
+
+    def band_top(caption, height=320, width=240):
+        lines, _, line_h, _ = layout_caption(caption, width)
+        return height - (len(lines) * line_h + 2 * CAPTION_PAD_Y)
+
+    two = band_top("Tutti i test passano. Non toccare niente.")
+    one = band_top("Sono libero.")
+    assert one > two, "a one-line band must start below a two-line one"
+
+
+def test_the_mascot_never_overlaps_the_caption_band():
+    from pc_app.render import CAPTION_RESERVE, mascot_box
+
+    for size in ((240, 320), (320, 240)):
+        _, top, side = mascot_box(size)
+        assert top + side <= size[1] - CAPTION_RESERVE, size
+
+
+def test_the_mascot_leaves_most_of_the_panel_to_everything_else():
+    """It was shrunk deliberately; this stops it creeping back up."""
+    from pc_app.render import MASCOT_MAX_SIZE, mascot_box
+
+    assert MASCOT_MAX_SIZE == 130
+    _, _, side = mascot_box((240, 320))
+    assert side <= MASCOT_MAX_SIZE
+
+
+# -- the text-mode presence badge --------------------------------------------------------------
+
+
+def _badge_crop(status: str):
+    from pc_app.render import TEXT_BADGE_CY, TEXT_BADGE_R, render_text_frame
+
+    frame = render_text_frame(status, "caption", (240, 320))
+    r = TEXT_BADGE_R + 2
+    cx = 240 // 2
+    return frame.crop((cx - r, TEXT_BADGE_CY - r, cx + r, TEXT_BADGE_CY + r)).tobytes()
+
+
+def test_every_status_draws_its_own_badge():
+    """Each status must be tellable from the badge alone -- that is the point of replacing the
+    name with a glyph. A status falling through to the wrong branch would collide here."""
+    crops = {status: _badge_crop(status) for status in build_memes.STATUSES}
+    collisions = [
+        (a, b)
+        for i, a in enumerate(build_memes.STATUSES)
+        for b in build_memes.STATUSES[i + 1 :]
+        if crops[a] == crops[b]
+    ]
+    assert collisions == [], collisions
+
+
+def test_the_badge_is_not_invisible_against_its_own_background():
+    """The disc takes the caption colour rather than the status colour, because the background
+    already *is* the status colour."""
+    from pc_app.render import contrast_on, status_colour
+
+    for status in build_memes.STATUSES:
+        background = status_colour(status)
+        assert contrast_on(background) != background
+
+
+def test_the_badge_clears_the_caption_block():
+    from pc_app.render import TEXT_BADGE_CY, TEXT_BADGE_R, TEXT_RULE_Y, TEXT_TOP
+
+    assert TEXT_BADGE_CY - TEXT_BADGE_R >= 0, "badge runs off the top of the panel"
+    assert TEXT_BADGE_CY + TEXT_BADGE_R < TEXT_RULE_Y, "badge overlaps its own rule"
+    assert TEXT_RULE_Y < TEXT_TOP, "rule overlaps the caption"

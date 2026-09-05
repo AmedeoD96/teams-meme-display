@@ -50,9 +50,13 @@ class Config:
     #: Screen orientation: "landscape" or "portrait". The board needs memes built for whichever
     #: one you pick (tools/build_memes.py builds both by default).
     orientation: str = "portrait"
-    #: "image" shows a meme with a caption band; "text" shows the caption alone on the status
-    #: colour, with no images involved.
-    display_mode: str = "image"
+    #: "mascot" draws the animated character; "image" shows a meme with a caption band; "text"
+    #: shows the caption alone on the status colour, with no images involved.
+    display_mode: str = "mascot"
+    #: How the phrases are worded: "normal", "sarcastic" or "retriever". Independent of the real
+    #: Teams status -- sarcasm mode stays discouraging while you are green. The device is told
+    #: this only so the mascot can pull the matching face; the phrasing itself is chosen here.
+    tone: str = "normal"
     #: Milliseconds a caption change is allowed to take. 0 switches instantly.
     transition_ms: int = 400
 

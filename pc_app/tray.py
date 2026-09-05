@@ -20,6 +20,7 @@ from pc_app.i18n import (
     LANGUAGE_NAMES,
     LANGUAGES,
     ORIENTATIONS,
+    TONES,
     status_label,
     tr,
 )
@@ -115,8 +116,18 @@ def _set_run_at_startup(enabled: bool) -> None:
         log.warning("could not update the Run key: %s", exc)
 
 
-def run_tray(worker: "Worker", config: Config) -> None:
-    """Run the tray icon. Blocks until the user quits; must be called on the main thread."""
+def build_icon(
+    worker: "Worker",
+    config: Config,
+    on_settings=None,
+    on_quit=None,
+) -> pystray.Icon:
+    """Build the tray icon and its menu.
+
+    Returns rather than runs it: the GUI owns the main thread (Tk insists), so the caller starts
+    `icon.run()` on a thread of its own. *on_settings* and *on_quit* are called from that thread,
+    so anything they touch in Tk has to be marshalled -- see pc_app/gui.py.
+    """
 
     def lang() -> str:
         return config.language
@@ -197,9 +208,24 @@ def run_tray(worker: "Worker", config: Config) -> None:
         _set_run_at_startup(config.start_with_windows)
         config.save()
 
-    def on_quit(icon, _item):
+    def make_tone_action(name: str):
+        def action(_icon, _item):
+            # set_tone saves the config, tells the board which face to pull, and asks for a fresh
+            # phrase -- the wording is chosen on this side.
+            worker.set_tone(name)
+            refresh()
+
+        return action
+
+    def on_settings_clicked(_icon, _item):
+        if on_settings is not None:
+            on_settings()
+
+    def on_quit_clicked(icon, _item):
         icon.visible = False
         icon.stop()
+        if on_quit is not None:
+            on_quit()
 
     override_menu = pystray.Menu(
         pystray.MenuItem(
@@ -251,6 +277,18 @@ def run_tray(worker: "Worker", config: Config) -> None:
         ),
     )
 
+    tone_menu = pystray.Menu(
+        *[
+            pystray.MenuItem(
+                (lambda n: lambda _item: tr(n, lang()))(name),
+                make_tone_action(name),
+                checked=(lambda n: lambda _item: config.tone == n)(name),
+                radio=True,
+            )
+            for name in TONES
+        ]
+    )
+
     orientation_menu = pystray.Menu(
         *[
             pystray.MenuItem(
@@ -266,8 +304,18 @@ def run_tray(worker: "Worker", config: Config) -> None:
     menu = pystray.Menu(
         pystray.MenuItem(status_text, None, enabled=False),
         pystray.Menu.SEPARATOR,
+        # Hidden on the fallback path where there is no window to open, so the menu never
+        # offers an entry that does nothing.
+        pystray.MenuItem(
+            lambda _item: tr("settings", lang()),
+            on_settings_clicked,
+            default=True,
+            visible=on_settings is not None,
+        ),
+        pystray.Menu.SEPARATOR,
         pystray.MenuItem(lambda _item: tr("next_meme", lang()), on_next),
         pystray.MenuItem(lambda _item: tr("force_status", lang()), override_menu),
+        pystray.MenuItem(lambda _item: tr("tone", lang()), tone_menu),
         pystray.MenuItem(lambda _item: tr("display", lang()), mode_menu),
         pystray.MenuItem(lambda _item: tr("language", lang()), language_menu),
         pystray.MenuItem(lambda _item: tr("orientation", lang()), orientation_menu),
@@ -280,7 +328,7 @@ def run_tray(worker: "Worker", config: Config) -> None:
             checked=lambda _item: config.start_with_windows,
         ),
         pystray.Menu.SEPARATOR,
-        pystray.MenuItem(lambda _item: tr("quit", lang()), on_quit),
+        pystray.MenuItem(lambda _item: tr("quit", lang()), on_quit_clicked),
     )
 
     icon = pystray.Icon(
@@ -296,4 +344,9 @@ def run_tray(worker: "Worker", config: Config) -> None:
         icon.update_menu()
 
     worker.on_status_change = on_status_change
-    icon.run()
+    return icon
+
+
+def run_tray(worker: "Worker", config: Config) -> None:
+    """Run the tray icon alone, with no settings window. Blocks until the user quits."""
+    build_icon(worker, config).run()
