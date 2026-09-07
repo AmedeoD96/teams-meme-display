@@ -2,6 +2,7 @@
 #pragma once
 
 #include <Arduino.h>
+#include <TFT_eSPI.h>
 
 #include "status.h"
 
@@ -15,23 +16,39 @@ constexpr int16_t kCaptionPadY = 6;
 // The band picks the largest font the caption fits in. Font 4 is far easier to read from across
 // a desk, but it is wide, so a long phrase drops to font 2 rather than being cut off. Mirrors
 // the CAPTION_* constants in pc_app/render.py.
+//
+// The big font gets four lines rather than three. At three, a phrase needing a fourth line fell
+// all the way to font 2 -- which then wanted only two lines, so the caption was drawn at 62% size
+// in a band left half empty. Across both shipped banks and a 530-phrase edited one, four lines is
+// enough for every phrase in either orientation, and the fallback stops being reachable in
+// practice.
 constexpr uint8_t kCaptionFontBig = 4;
 constexpr int16_t kCaptionLineHBig = 26;
-constexpr uint8_t kCaptionLinesBig = 3;
+constexpr uint8_t kCaptionLinesBig = 4;
 constexpr uint8_t kCaptionFontSmall = 2;
 constexpr int16_t kCaptionLineHSmall = 16;
-constexpr uint8_t kCaptionLinesSmall = 4;
+//: Six of these still fit inside the reserve below, so the fallback can use the whole band.
+constexpr uint8_t kCaptionLinesSmall = 6;
 
-//: Array sizing: the small font is the one allowed the most lines.
-constexpr uint8_t kCaptionMaxLines = kCaptionLinesSmall;
+//: Array sizing. It must exceed the big font's budget too: layoutCaptionBand() tells "fits" from
+//: "would be cut short" by giving wrapText() more slots than the budget and seeing how many come
+//: back, and that stops working the moment the array is only as large as the budget itself.
+constexpr uint8_t kCaptionMaxLines =
+    kCaptionLinesSmall > kCaptionLinesBig ? kCaptionLinesSmall : kCaptionLinesBig + 1;
 //: The tallest the band can get, which is the space the mascot keeps clear of. The big font
 //: at its line limit is taller than the small font at its own, so that is the bound.
 constexpr int16_t kCaptionReserve = kCaptionLinesBig * kCaptionLineHBig + 2 * kCaptionPadY;
+static_assert(kCaptionLinesSmall * kCaptionLineHSmall + 2 * kCaptionPadY <= kCaptionReserve,
+              "the small font's tallest band must still fit the space the scene keeps clear");
 
 //: Text mode has the whole screen, so a caption can breathe over more lines.
 constexpr uint8_t kTextModeMaxLines = 8;
 
 void begin(Orientation orientation, DisplayMode mode);
+
+// The panel itself, for the one other module that draws straight at it: the alert GIF, which
+// takes the whole screen over rather than composing into a frame. Valid only after begin().
+TFT_eSPI *panel();
 
 // Re-rotates the panel. The caller must repaint afterwards -- the screen is cleared.
 void setOrientation(Orientation orientation);

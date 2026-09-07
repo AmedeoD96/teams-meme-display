@@ -496,6 +496,8 @@ void setOrientation(Orientation newOrientation) {
 
 Orientation orientation() { return gOrientation; }
 
+TFT_eSPI *panel() { return &tft; }
+
 void setMode(DisplayMode newMode) {
   if (newMode == gMode) return;
   gMode = newMode;

@@ -6,12 +6,12 @@ namespace {
 Handlers gHandlers;
 String gBuffer;
 uint32_t gLastCommandMs = 0;
+uint32_t gLastByteMs = 0;
 bool gDiscarding = false;
 
-// Guards against a peer that never sends a newline filling up RAM. Long enough for the longest
-// CAPTION: the PC will send (MAX_PHRASE_CHARS in pc_app/phrases.py, plus the prefix) with room
-// to spare.
-constexpr size_t kMaxLine = 160;
+// How long a half-finished line is allowed to sit before it is treated as noise. Longer than any
+// gap inside a line the PC sends -- even a GIFDATA chunk arrives in one burst at 115200.
+constexpr uint32_t kPartialLineMs = 250;
 
 void dispatch(String line) {
   line.trim();
@@ -87,6 +87,30 @@ void dispatch(String line) {
   } else if (command == "CAPTION") {
     gLastCommandMs = millis();
     if (gHandlers.onCaption) gHandlers.onCaption(value);
+  } else if (command == "ALERT") {
+    gLastCommandMs = millis();
+    // Clamped rather than rejected: a bad value should still show *something* briefly instead of
+    // parking the GIF on screen forever.
+    if (gHandlers.onAlert) gHandlers.onAlert(constrain(value.toInt(), 200, 60000));
+  } else if (command == "GIFBEGIN") {
+    gLastCommandMs = millis();
+    // "<bytes>:<crc32>". Both unsigned 32-bit, so they are parsed as 64-bit and narrowed --
+    // toInt() is signed and a CRC above 2^31 would come back negative.
+    const int split = value.indexOf(':');
+    if (split < 0) {
+      Serial.println(F("EVT:GIFERR:malformed GIFBEGIN"));
+      return;
+    }
+    if (gHandlers.onGifBegin) {
+      gHandlers.onGifBegin(strtoul(value.substring(0, split).c_str(), nullptr, 10),
+                           strtoul(value.substring(split + 1).c_str(), nullptr, 10));
+    }
+  } else if (command == "GIFDATA") {
+    gLastCommandMs = millis();
+    if (gHandlers.onGifData) gHandlers.onGifData(value);
+  } else if (command == "GIFEND") {
+    gLastCommandMs = millis();
+    if (gHandlers.onGifEnd) gHandlers.onGifEnd();
   } else {
     Serial.printf("LOG:ignoring '%s'\n", command.c_str());
   }
@@ -98,10 +122,23 @@ void begin(const Handlers &handlers) {
   gHandlers = handlers;
   gBuffer.reserve(kMaxLine);
   gLastCommandMs = millis();
+  gLastByteMs = millis();
 }
 
 void poll() {
+  // A partial line that stopped arriving is junk: a burst of noise from the USB bridge as the PC
+  // boots or opens the port, or a sender that died mid-line. Dropping it matters because the next
+  // real command would otherwise be glued onto it and parse as nothing -- which is how a board
+  // plugged in at boot could stay unreachable until it was power-cycled.
+  // Only with nothing waiting to be read: rendering a frame can hold up the loop for longer than
+  // this timeout, and the rest of a perfectly good line would be sitting in the FIFO meanwhile.
+  if (!Serial.available() && (gBuffer.length() > 0 || gDiscarding) &&
+      millis() - gLastByteMs > kPartialLineMs) {
+    gBuffer = "";
+    gDiscarding = false;
+  }
   while (Serial.available()) {
+    gLastByteMs = millis();
     const char c = static_cast<char>(Serial.read());
     if (c == '\n') {
       if (!gDiscarding) dispatch(gBuffer);

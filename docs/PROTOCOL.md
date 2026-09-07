@@ -44,6 +44,10 @@ Note that Teams never writes "in a meeting" as an availability value — it writ
 | `TONE:<name>` | `normal` / `sarcastic` / `retriever`. Only picks the mascot's expression -- see "Who owns the words" below. Persisted in NVS. |
 | `CAPTION:<text>` | The phrase to display now. Takes precedence over the board's own bank until the PC goes quiet. |
 | `TRANSITION:<ms>` | Cross-fade duration for a caption change, 0-2000. `0` switches instantly. Persisted in NVS. |
+| `ALERT:<ms>` | Play the alert GIF for this long, then go back to the status display. Clamped to 200-60000. |
+| `GIFBEGIN:<bytes>:<crc32>` | Start replacing the alert GIF. See "Uploading a GIF". |
+| `GIFDATA:<base64>` | One chunk of it. |
+| `GIFEND` | Verify and commit. |
 | `PING` | Liveness / port-detection probe. |
 
 ## Who owns the words
@@ -79,13 +83,97 @@ orientation and it falls back to the built-in drawn scene.
 | `PONG` | Reply to `PING`. Used by `serial_link.find_port()` to identify the right COM port. |
 | `LOG:<text>` | Free-form diagnostics. The PC app logs these at debug level. |
 | `EVT:NEXT` | The screen was tapped. The board picks a new meme itself and this asks the PC for a fresh phrase. |
+| `EVT:GIFACK:<bytes>` | Upload flow control: that many bytes are safely written, send the next window. |
+| `EVT:GIFOK:<bytes>` | The upload verified and is now the alert GIF. |
+| `EVT:GIFERR:<reason>` | The upload was refused or failed. The previous GIF is untouched. |
+
+## The out-of-hours alert
+
+`ALERT:<ms>` plays `/alert.gif` over whatever is on screen and then puts the status display back.
+The board does not decide when: the PC does, because the PC is the side that can see your Teams
+notifications and knows the working hours you configured. See `pc_app/work_hours.py`.
+
+What the PC is reacting to is a *rise* in the unread notification count, which Teams writes to
+its own log:
+
+```
+UserNotificationAction: {cloud_context: https://teams.microsoft.com, unread notification count: 1 }
+```
+
+That is a count and nothing else. There is no sender and no message text anywhere in the log, so
+the alert can say that something arrived and never what it was. Three further limits are worth
+knowing: Teams writes nothing at all while it has never been foregrounded since launch (the same
+constraint presence has -- see Troubleshooting in the README), reading a message instantly can
+mean the count never rises, and not every kind of notification bumps the badge.
+
+Playback is driven a frame at a time from `loop()` rather than by a blocking play call, so
+`serial_link::poll()` keeps running throughout and a `STATUS:` sent during an alert still
+arrives. A tap on the screen dismisses the GIF early.
+
+GIF decoding fits on a board with no PSRAM for exactly the reason JPEG does: `AnimatedGIF` hands
+back one scanline at a time through a callback, so there is never a framebuffer. The GIF is
+centred, so a single asset serves both orientations.
+
+## Uploading a GIF
+
+The alert GIF can be replaced from the settings window with no reflash, in the same spirit as the
+phrases -- see "Who owns the words" above. Three commands:
+
+```
+GIFBEGIN:<bytes>:<crc32>     ->  EVT:GIFACK:0     (or EVT:GIFERR:<reason>)
+GIFDATA:<base64>   x16       ->  EVT:GIFACK:<bytes so far>
+...
+GIFEND                       ->  EVT:GIFOK:<bytes>  (or EVT:GIFERR:<reason>)
+```
+
+**Base64, not raw binary.** The payload rides the ordinary line protocol, so the framing in
+`serial_link::poll()` needs no binary mode and the wire stays human-readable. A chunk is 96 raw
+bytes, which is 128 base64 characters; with the `GIFDATA:` prefix that is 136, inside the
+160-character `kMaxLine`. `CHUNK_BYTES` in `pc_app/gif_upload.py` is sized against that constant,
+and a test asserts every generated line fits.
+
+**The window exists for a reason.** The board acknowledges every 16 chunks and the PC waits for
+that before sending more. Writing to LittleFS takes time, and without the pause the sender would
+outrun the serial RX buffer. `Serial.setRxBufferSize(4096)` in `setup()` is the other half of the
+same problem -- the 256-byte default is about 22 ms of runway at 115200, less than a single GIF
+frame takes to decode.
+
+**Nothing is committed until it verifies.** Bytes land in `/alert.gif.tmp`; only once the length
+and the CRC32 both match is it renamed over `/alert.gif`. Pull the cable mid-transfer and the old
+GIF is still the one that plays. A transfer that simply stops is abandoned after ten seconds.
+
+The CRC is the plain reflected CRC-32 that `zlib.crc32` computes, written out longhand in
+`alert.cpp` rather than taken from ESP-IDF, whose initial-value convention is easy to get subtly
+wrong.
+
+**The file is always re-encoded on the PC first**, never passed through. The decoder keeps no
+canvas, so a GIF carrying *local* colour palettes cannot be rendered correctly; `prepare_gif()`
+puts every frame on one global palette, caps the size at 240x240, and trims frames and then
+colours until it fits. Frames stay cropped to what changed, which is fine -- with disposal method
+1 the panel itself is the canvas.
+
+`ALERT:` is refused while an upload is in progress, because the decoder would be reading a file
+that is being rewritten underneath it.
 
 ## Port detection
 
 `pc_app/serial_link.py` enumerates COM ports, tries CH340 devices (VID:PID `1A86:7523`) first
-and then any remaining port. For each candidate it opens at 115200, sends `PING`, and accepts the
-port only if `PONG` or `READY:` arrives within the probe timeout. This avoids grabbing an
-unrelated serial device.
+and then any remaining port. For each candidate it opens at 115200 with DTR and RTS left low --
+asserting them resets the board on the revisions wired for auto-reset -- and then repeats
+`
+PING
+` until the probe timeout runs out, accepting the port as soon as `PONG` or `READY:`
+comes back. This avoids grabbing an unrelated serial device.
+
+The leading newline and the repeat are both deliberate. The board assembles a line byte by byte
+and acts on it only at the newline, so a stray byte already in its buffer would turn a single
+`PING` into an unrecognised line and leave the board undiscoverable until it was power-cycled.
+The newline closes off whatever is stuck there; the repeat covers a PING that arrives while the
+board is still booting.
+
+If nothing answers but exactly one CH340 is attached, the app uses that port anyway and logs a
+warning: it is almost certainly the board, and refusing it would leave the display stuck on
+`DISCONNECTED` with no way out for someone running the packaged app.
 
 ## Testing by hand
 
@@ -100,6 +188,7 @@ Then type any of these and watch the display react:
 ```
 PING
 STATUS:IN_MEETING
+ALERT:6000
 STATUS:DND
 NEXT
 BRIGHT:20

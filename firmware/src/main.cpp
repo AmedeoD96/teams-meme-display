@@ -7,6 +7,7 @@
 #include <Preferences.h>
 #include <esp_random.h>
 
+#include "alert.h"
 #include "content.h"
 #include "display.h"
 #include "serial_link.h"
@@ -35,6 +36,9 @@ bool gTimedOut = true;
 String gPcCaption;
 
 void renderFrame() {
+  // The alert owns the panel while it is up. Whatever changed underneath is drawn when it ends,
+  // from a clean slate -- see the alert::tick() branch in loop().
+  if (alert::active()) return;
   // Only image mode draws a meme, so do not spend a LittleFS read picking one otherwise -- this
   // runs on every rotation tick.
   const String meme =
@@ -97,6 +101,19 @@ void onCaption(const String &caption) {
   renderFrame();
 }
 
+void onAlert(uint32_t durationMs) {
+  // A failed play() leaves the status display exactly as it was, so there is nothing to repaint.
+  alert::play(durationMs);
+}
+
+// The upload is alert.cpp's business end to end -- it owns the file and the checksum -- so these
+// only forward. The board answers each one on the wire; see docs/PROTOCOL.md.
+void onGifBegin(uint32_t bytes, uint32_t crc) { alert::uploadBegin(bytes, crc); }
+
+void onGifData(const String &encoded) { alert::uploadChunk(encoded); }
+
+void onGifEnd() { alert::uploadEnd(); }
+
 void onTransition(uint16_t ms) {
   if (ms == display::transitionMs()) return;
   display::setTransitionMs(ms);
@@ -133,7 +150,7 @@ void checkPcTimeout() {
 }
 
 void checkRotation() {
-  if (gRotateSeconds == 0) return;
+  if (gRotateSeconds == 0 || alert::active()) return;
   if (millis() - gLastFrameMs < static_cast<uint32_t>(gRotateSeconds) * 1000UL) return;
   // With a PC attached the wording is its business, and it runs a rotation timer of its own.
   // Outside image mode there is nothing else to rotate, so repainting here would only fight it.
@@ -156,6 +173,10 @@ E storedEnum(const char *key, uint8_t count, E fallback) {
 }  // namespace
 
 void setup() {
+  // Must precede begin(). The default 256 bytes is about 22ms of runway at 115200, which is less
+  // than one GIF frame takes to decode -- and far less than a GIF upload needs to stay ahead of
+  // the LittleFS writes. See docs/PROTOCOL.md.
+  Serial.setRxBufferSize(4096);
   Serial.begin(115200);
 
   gPrefs.begin("teamsmeme", false);
@@ -172,6 +193,7 @@ void setup() {
   display::setBrightness(brightness);
   display::setTransitionMs(gPrefs.getUShort("trans", 400));
   touch::begin();
+  alert::begin(display::panel());
   content::begin(orientation, language);
 
   // The ESP32's hardware RNG, so the meme order differs between boots.
@@ -189,6 +211,10 @@ void setup() {
   handlers.onTransition = onTransition;
   handlers.onTone = onTone;
   handlers.onCaption = onCaption;
+  handlers.onAlert = onAlert;
+  handlers.onGifBegin = onGifBegin;
+  handlers.onGifData = onGifData;
+  handlers.onGifEnd = onGifEnd;
   serial_link::begin(handlers);
 
   Serial.printf("LOG:%u memes (%s), language %s, mode %s\n", content::totalMemes(),
@@ -201,13 +227,27 @@ void setup() {
 void loop() {
   serial_link::poll();
   if (touch::tapped()) {
-    // Tell the PC so it can send a fresh phrase; the meme we can change on our own.
-    Serial.println(F("EVT:NEXT"));
-    renderFrame();
+    // A tap during an alert dismisses it rather than asking for a new meme -- the GIF is in the
+    // way, and getting rid of it is the obvious thing a tap should do.
+    if (alert::active()) {
+      alert::stop();
+      display::invalidate();
+      renderFrame();
+    } else {
+      // Tell the PC so it can send a fresh phrase; the meme we can change on our own.
+      Serial.println(F("EVT:NEXT"));
+      renderFrame();
+    }
   }
   checkPcTimeout();
   checkRotation();
+  if (alert::tick()) {
+    // The alert just ended and it painted over everything, so the status display is rebuilt from
+    // scratch rather than caption-faded onto a screen that is no longer there.
+    display::invalidate();
+    renderFrame();
+  }
   // Drives the mascot animation and its caption fade. Returns immediately in the other modes.
-  display::tick(gStatus, gTone);
+  if (!alert::active()) display::tick(gStatus, gTone);
   delay(10);
 }
