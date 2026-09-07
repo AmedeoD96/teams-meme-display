@@ -16,6 +16,8 @@ firmware/.vscode/
 firmware/data/memes/
 firmware/data/captions/
 firmware/data/manifest.json
+# The re-encoded copy of assets/alert.gif; the source of it is committed, this is build output.
+firmware/data/alert.gif
 
 # Meme preview renders
 preview/

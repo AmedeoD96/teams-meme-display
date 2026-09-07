@@ -27,13 +27,16 @@ CAPTION_PAD_Y = 6
 # and 2; these are the desktop point sizes that stand in for them at the same line heights.
 CAPTION_FONT_BIG = 20
 CAPTION_LINE_H_BIG = 26
-CAPTION_LINES_BIG = 3
+#: Four, not three: at three a phrase needing a fourth line dropped to the small font, which then
+#: wanted only two -- drawn at 62% size in a half-empty band. See kCaptionLinesBig in display.h.
+CAPTION_LINES_BIG = 4
 CAPTION_FONT_SMALL = 14
 CAPTION_LINE_H_SMALL = 16
-CAPTION_LINES_SMALL = 4
+CAPTION_LINES_SMALL = 6
 
-#: The small font is the one allowed the most lines, so it bounds the array.
-CAPTION_MAX_LINES = CAPTION_LINES_SMALL
+#: Bounds the wrap. It has to exceed the big font's budget as well, or layout_caption() can no
+#: longer tell a caption that fits from one the wrap cut short.
+CAPTION_MAX_LINES = max(CAPTION_LINES_SMALL, CAPTION_LINES_BIG + 1)
 #: Vertical space the caption band can take, so scene art can stay clear of it. The big font at
 #: its line limit is taller than the small font at its own.
 CAPTION_RESERVE = CAPTION_LINES_BIG * CAPTION_LINE_H_BIG + 2 * CAPTION_PAD_Y

@@ -31,6 +31,15 @@ USER_PRESENCE_ACTION = re.compile(
     r"UserPresenceAction:\s*\{cloud_context:\s*([^,]+),\s*availability:\s*(\w+)\s*\}"
 )
 
+# Notifications, preferred form. Emitted when the unread badge count changes, and carries the
+# cloud context, so with several accounts signed in it can be attributed to one of them:
+#   UserNotificationAction: {cloud_context: https://teams.microsoft.com, unread notification count: 1 }
+# This is a *count*, not a message: there is no sender and no text anywhere in the log.
+USER_NOTIFICATION_ACTION = re.compile(
+    r"UserNotificationAction:\s*\{cloud_context:\s*([^,]+),\s*"
+    r"unread notification count:\s*(\d+)\s*\}"
+)
+
 # Presence, fallback form. Appears once per signed-in account on a single line, e.g.
 #   State Event: UserDataGlobalState total number of users: 2
 #   { availability: PresenceUnknown, unread notification count: 0 }
@@ -173,6 +182,10 @@ class LogState:
     in_call: bool = False
     log_found: bool = False
     unread: int = 0
+    #: Bumped every time the unread count is seen to *rise*. A monotonic counter rather than a
+    #: flag so a reader that polls once a second can diff it and cannot miss an event, and so
+    #: nothing has to be reset by the reader. See TeamsLogWatcher._observe_unread.
+    unread_events: int = 0
     accounts: dict[str, str] = field(default_factory=dict)
 
 
@@ -202,6 +215,27 @@ def parse_availability(line: str, cloud_context: str | None = None) -> str | Non
     return blocks[0]
 
 
+def parse_unread(line: str, cloud_context: str | None = None) -> int | None:
+    """Extract an unread notification count from one log line, or None if it carries no count.
+
+    The preferred form is returned on its own: it names an account, so it can be filtered by
+    *cloud_context*. The fallback form cannot be attributed to an account at all, so the best
+    available reading is the highest count on the line.
+    """
+    contexts = {ctx.strip(): int(count) for ctx, count in USER_NOTIFICATION_ACTION.findall(line)}
+    if contexts:
+        if cloud_context:
+            for ctx, count in contexts.items():
+                if cloud_context in ctx:
+                    return count
+        return max(contexts.values())
+
+    blocks = AVAILABILITY_BLOCK.findall(line)
+    if not blocks:
+        return None
+    return max(int(count) for _value, count in blocks)
+
+
 def _read_tail_bytes(path: Path, limit: int) -> list[str]:
     """Read at most the last *limit* bytes of *path* as lines."""
     try:
@@ -225,6 +259,11 @@ class TeamsLogWatcher:
         self.state = LogState()
         self._main_tail: Tail | None = None
         self._slim_tail: Tail | None = None
+        #: Set once a UserNotificationAction line has been seen. From then on the aggregate
+        #: fallback form is ignored for counts: the two disagree when a second account carries
+        #: its own unread backlog, and alternating between them would look like a rise every
+        #: other line.
+        self._have_notification_action = False
 
     # -- file rotation -------------------------------------------------------------------
 
@@ -243,16 +282,41 @@ class TeamsLogWatcher:
 
     # -- scanning ------------------------------------------------------------------------
 
-    def _scan_lines(self, lines: list[str]) -> None:
+    def _observe_unread(self, count: int, emit: bool) -> None:
+        """Record a new unread count, raising an event when it went up.
+
+        Only a *rise* is an event: a message arriving takes the badge up, reading one takes it
+        back down, and nobody wants the GIF for the second of those.
+        """
+        previous = self.state.unread
+        self.state.unread = count
+        if emit and count > previous:
+            self.state.unread_events += 1
+            log.debug("unread %d -> %d (event %d)", previous, count, self.state.unread_events)
+
+    def _scan_lines(self, lines: list[str], emit: bool = True, baseline_first: bool = False) -> None:
+        """Scan main-log lines. *baseline_first* takes the first count as a baseline only.
+
+        That is what a freshly rotated log needs: Teams restates the current unread count when it
+        opens a new file, and a restart should not read as a burst of arrivals.
+        """
+        pending_baseline = baseline_first
         for line in lines:
             availability = parse_availability(line, self.cloud_context)
             if availability is not None:
                 self.state.availability = availability
             for ctx, value in USER_PRESENCE_ACTION.findall(line):
                 self.state.accounts[ctx.strip()] = value
-            blocks = AVAILABILITY_BLOCK.findall(line)
-            if blocks:
-                self.state.unread = max(int(unread) for _value, unread in blocks)
+
+            if USER_NOTIFICATION_ACTION.search(line):
+                self._have_notification_action = True
+            elif self._have_notification_action:
+                continue  # the aggregate form is no longer trusted for counts
+            count = parse_unread(line, self.cloud_context)
+            if count is None:
+                continue
+            self._observe_unread(count, emit=emit and not pending_baseline)
+            pending_baseline = False
 
     def _scan_call_lines(self, lines: list[str]) -> None:
         for line in lines:
@@ -281,7 +345,8 @@ class TeamsLogWatcher:
             if age > PRIME_MAX_AGE_DAYS:
                 log.info("stopping prime scan at %s (%.0f days old)", path.name, age)
                 break
-            self._scan_lines(_read_tail_bytes(path, PRIME_SCAN_BYTES))
+            # emit=False: starting the app with a backlog of unread messages is not an arrival.
+            self._scan_lines(_read_tail_bytes(path, PRIME_SCAN_BYTES), emit=False)
             if self.state.availability is not None:
                 log.info(
                     "primed from %s -> availability=%s%s",
@@ -308,12 +373,12 @@ class TeamsLogWatcher:
 
     def poll(self) -> LogState:
         """Consume anything new in both logs and return the updated state."""
-        self._main_tail, _main_is_new = self._rotate(self._main_tail, MAIN_LOG_RE)
+        self._main_tail, main_is_new = self._rotate(self._main_tail, MAIN_LOG_RE)
         self._slim_tail, slim_is_new = self._rotate(self._slim_tail, SLIMCORE_LOG_RE)
         self.state.log_found = self._main_tail is not None
 
         if self._main_tail is not None:
-            self._scan_lines(self._main_tail.read_new_lines())
+            self._scan_lines(self._main_tail.read_new_lines(), baseline_first=main_is_new)
         if self._slim_tail is not None:
             lines = self._slim_tail.read_new_lines()
             has_markers = any(CALL_START.search(l) or CALL_END.search(l) for l in lines)

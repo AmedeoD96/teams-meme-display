@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import os
-from dataclasses import asdict, dataclass, fields
+from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
 
 log = logging.getLogger(__name__)
@@ -59,6 +59,23 @@ class Config:
     tone: str = "normal"
     #: Milliseconds a caption change is allowed to take. 0 switches instantly.
     transition_ms: int = 400
+
+    # -- out-of-hours alert ----------------------------------------------------------------
+    # A Teams notification arriving outside the working window below plays a GIF on the board
+    # for a moment. See pc_app/work_hours.py for the window rules and docs/PROTOCOL.md for the
+    # ALERT: command this ends up sending.
+
+    #: Master switch. With this off the notification count is still parsed but nothing is sent.
+    alert_enabled: bool = True
+    #: The working window, "HH:MM". An end below the start wraps past midnight (22:00-06:00).
+    work_start: str = "09:00"
+    work_end: str = "18:00"
+    #: Weekdays that count as working, Monday=0, matching datetime.weekday().
+    work_days: list[int] = field(default_factory=lambda: [0, 1, 2, 3, 4])
+    #: How long the GIF plays before the board goes back to the status display.
+    alert_seconds: float = 6.0
+    #: Minimum gap between two alerts, so a burst of messages does not loop the GIF.
+    alert_cooldown_seconds: float = 60.0
 
     start_with_windows: bool = False
 

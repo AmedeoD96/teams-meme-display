@@ -19,6 +19,7 @@ from pc_app.teams_log import (
     TeamsLogWatcher,
     newest_log,
     parse_availability,
+    parse_unread,
 )
 
 # -- fixture lines -----------------------------------------------------------------------
@@ -393,3 +394,155 @@ def test_override_pins_the_status_and_releases_cleanly():
 
     engine.set_override(None)
     assert engine.observe("Offline", now=3.0) is Status.OFFLINE
+
+
+# -- notification counts -----------------------------------------------------------------
+#
+# The alert keys off a *rise* in the unread badge count. These fixture lines follow the shape
+# seen in a real MSTeams_*.log: the precise UserNotificationAction line is emitted first, and the
+# same change is then restated on the aggregate State Event lines.
+
+
+def _notify(count: int, context: str = "https://teams.microsoft.com") -> str:
+    return (
+        "2026-09-05T13:04:00.992179+02:00 0x00002140 <INFO> "
+        "native_modules::UserDataCrossCloudModule: Received Action: "
+        f"UserNotificationAction: {{cloud_context: {context}, unread notification count: {count} }}"
+    )
+
+
+def _block(count: int, availability: str = "Available") -> str:
+    return (
+        "2026-09-05T13:04:00.992179+02:00 0x00002140 <INFO> State Event: UserDataGlobalState "
+        f"total number of users: 1 {{ availability: {availability}, "
+        f"unread notification count: {count} }}"
+    )
+
+
+def test_parse_unread_reads_the_precise_form():
+    assert parse_unread(_notify(3)) == 3
+    assert parse_unread(_notify(0)) == 0
+
+
+def test_parse_unread_falls_back_to_the_aggregate_form():
+    assert parse_unread(MULTI_ACCOUNT) == 3  # the highest count on the line
+
+
+def test_parse_unread_ignores_lines_without_a_count():
+    assert parse_unread(NOISE) is None
+    assert parse_unread(PRESENCE_ACTION) is None
+
+
+def test_parse_unread_honours_the_cloud_context_filter():
+    line = _notify(1) + " " + _notify(7, "https://gov.teams.microsoft.us")
+    assert parse_unread(line, cloud_context="gov.teams.microsoft.us") == 7
+    assert parse_unread(line, cloud_context="teams.microsoft.com") == 1
+
+
+def test_a_rising_count_raises_exactly_one_event(tmp_path):
+    main = tmp_path / f"MSTeams_{_today()}_10-00-00.00.log"
+    _write(main, NOISE, _notify(0))
+    watcher = TeamsLogWatcher(log_dir=tmp_path)
+    watcher.prime()
+
+    # The one arrival, restated on the two aggregate lines that follow it in a real log.
+    _write(main, _notify(1), _block(1), _block(1))
+    state = watcher.poll()
+
+    assert state.unread == 1
+    assert state.unread_events == 1
+
+
+def test_a_steady_count_raises_nothing(tmp_path):
+    main = tmp_path / f"MSTeams_{_today()}_10-00-00.00.log"
+    _write(main, _notify(2))
+    watcher = TeamsLogWatcher(log_dir=tmp_path)
+    watcher.prime()
+
+    _write(main, _notify(2), _notify(2), NOISE)
+    assert watcher.poll().unread_events == 0
+
+
+def test_reading_a_message_raises_nothing(tmp_path):
+    """The badge going back down is somebody catching up, not an arrival."""
+    main = tmp_path / f"MSTeams_{_today()}_10-00-00.00.log"
+    _write(main, _notify(3))
+    watcher = TeamsLogWatcher(log_dir=tmp_path)
+    watcher.prime()
+
+    _write(main, _notify(0))
+    state = watcher.poll()
+    assert state.unread == 0
+    assert state.unread_events == 0
+
+
+def test_a_second_arrival_after_catching_up_raises_a_second_event(tmp_path):
+    main = tmp_path / f"MSTeams_{_today()}_10-00-00.00.log"
+    _write(main, _notify(0))
+    watcher = TeamsLogWatcher(log_dir=tmp_path)
+    watcher.prime()
+
+    _write(main, _notify(1))
+    assert watcher.poll().unread_events == 1
+    _write(main, _notify(0))
+    assert watcher.poll().unread_events == 1
+    _write(main, _notify(1))
+    assert watcher.poll().unread_events == 2
+
+
+def test_prime_takes_a_backlog_as_a_baseline_not_an_arrival(tmp_path):
+    """Starting the app on an unread backlog must not fire the alert."""
+    main = tmp_path / f"MSTeams_{_today()}_10-00-00.00.log"
+    _write(main, NOISE, _notify(0), _notify(4), _notify(9))
+
+    state = TeamsLogWatcher(log_dir=tmp_path).prime()
+
+    assert state.unread == 9
+    assert state.unread_events == 0
+
+
+def test_a_log_rotation_restating_the_count_is_not_an_arrival(tmp_path):
+    """Teams rotates its log on every launch and restates the current count in the new file."""
+    today = _today()
+    first = tmp_path / f"MSTeams_{today}_10-00-00.00.log"
+    _write(first, _notify(0))
+    watcher = TeamsLogWatcher(log_dir=tmp_path)
+    watcher.prime()
+
+    # Teams restarts: a new log opens, and the first thing it says is "you have 5 unread".
+    second = tmp_path / f"MSTeams_{today}_11-00-00.01.log"
+    _write(second, NOISE, _notify(5), NOISE)
+    assert watcher.poll().unread_events == 0
+
+    # ...but a genuine arrival in that same new file still counts.
+    _write(second, _notify(6))
+    assert watcher.poll().unread_events == 1
+
+
+def test_the_aggregate_form_is_dropped_once_the_precise_one_is_available(tmp_path):
+    """A second account with its own backlog makes the two forms disagree.
+
+    Alternating between "1 for my account" and "5 across all accounts" would otherwise look like
+    an arrival every other line.
+    """
+    main = tmp_path / f"MSTeams_{_today()}_10-00-00.00.log"
+    _write(main, _notify(1))
+    watcher = TeamsLogWatcher(log_dir=tmp_path, cloud_context="teams.microsoft.com")
+    watcher.prime()
+
+    for _ in range(3):
+        _write(main, MULTI_ACCOUNT, _notify(1))
+    state = watcher.poll()
+
+    assert state.unread == 1
+    assert state.unread_events == 0
+
+
+def test_the_aggregate_form_is_used_when_that_is_all_there_is(tmp_path):
+    main = tmp_path / f"MSTeams_{_today()}_10-00-00.00.log"
+    _write(main, _block(0))
+    watcher = TeamsLogWatcher(log_dir=tmp_path)
+    watcher.prime()
+
+    _write(main, _block(2))
+    assert watcher.poll().unread_events == 1

@@ -83,6 +83,51 @@ def figure(sources: list[tuple[Path, str]], destination: Path) -> None:
     print(f"wrote {destination.relative_to(REPO)}  ({sheet.width}x{sheet.height}, {kb:.0f} KB)")
 
 
+def build_alert_figure(destination: Path) -> None:
+    """Three moments of the alert GIF, as the board centres it on the portrait panel.
+
+    Composed here rather than run through build_memes.py --preview because the alert is not a
+    status: it has no caption band and no presence badge, it simply takes the screen.
+    """
+    source = REPO / "assets" / "alert.gif"
+    if not source.exists():
+        print(f"no {source.relative_to(REPO)}; run tools/make_alert_gif.py first")
+        return
+
+    panel = (240, 320)
+    shots = []
+    with Image.open(source) as gif:
+        # Spread across the loop so the swing and the badge blink are both visible.
+        picks = [0, gif.n_frames // 4, gif.n_frames // 2]
+        for index in picks:
+            gif.seek(index)
+            frame = gif.convert("RGB")
+            screen = Image.new("RGB", panel, (0, 0, 0))
+            screen.paste(frame, ((panel[0] - frame.width) // 2, (panel[1] - frame.height) // 2))
+            shots.append(screen)
+
+    frames = [framed(shot) for shot in shots]
+    cell_w, cell_h = frames[0].size
+    width = PAD + len(frames) * (cell_w + PAD)
+    sheet = Image.new("RGB", (width, PAD + cell_h + LABEL_H + PAD // 2), BG)
+    draw = ImageDraw.Draw(sheet)
+
+    for index, frame in enumerate(frames):
+        sheet.paste(frame, (PAD + index * (cell_w + PAD), PAD))
+    draw.text(
+        (width // 2, PAD + cell_h + LABEL_H // 2),
+        "The out-of-hours alert, centred on the panel",
+        font=font(15),
+        fill=LABEL,
+        anchor="mm",
+    )
+
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    sheet.save(destination, format="PNG", optimize=True)
+    kb = destination.stat().st_size / 1024
+    print(f"wrote {destination.relative_to(REPO)}  ({sheet.width}x{sheet.height}, {kb:.0f} KB)")
+
+
 def build_previews() -> None:
     """Regenerate preview/ so the figures reflect whatever memes are currently in memes/."""
     # English first, its frames set aside under an en__ prefix; Italian second so the plainly
@@ -181,6 +226,8 @@ def main() -> int:
         ],
         OUT / "languages.png",
     )
+
+    build_alert_figure(OUT / "alert-gif.png")
 
     print("\nFigures are renders of what the firmware draws, not photos of the panel.")
     return 0

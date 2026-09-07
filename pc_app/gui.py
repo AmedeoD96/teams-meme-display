@@ -20,11 +20,15 @@ import queue
 import subprocess
 import threading
 import tkinter as tk
-from tkinter import ttk
+from pathlib import Path
+from tkinter import filedialog, messagebox, ttk
 
 from PIL import Image, ImageTk
 
+from pc_app import work_hours
 from pc_app.config import Config, config_dir
+from pc_app.gif_upload import MAX_BYTES as GIF_MAX_BYTES
+from pc_app.gif_upload import estimate_seconds
 from pc_app.i18n import (
     DISPLAY_MODES,
     LANGUAGE_NAMES,
@@ -143,6 +147,7 @@ class App:
             except Exception:
                 # A failed menu action must not take the whole window down.
                 log.exception("queued GUI action failed")
+        self._refresh_connection()
         self.root.after(100, self._pump)
 
     # -- lifecycle -----------------------------------------------------------------------
@@ -187,13 +192,16 @@ class App:
 
         self._messages = ttk.Frame(notebook)
         self._look = ttk.Frame(notebook)
+        self._alerts = ttk.Frame(notebook)
         self._device = ttk.Frame(notebook)
         notebook.add(self._messages, text="Messages")
         notebook.add(self._look, text="Look")
+        notebook.add(self._alerts, text="Alerts")
         notebook.add(self._device, text="Device")
 
         self._build_messages(self._messages)
         self._build_look(self._look)
+        self._build_alerts(self._alerts)
         self._build_device(self._device)
         self._reload_from_config()
 
@@ -349,6 +357,210 @@ class App:
         self._look_preview = PreviewPane(parent)
         self._look_preview.grid(row=0, column=1, sticky="n", pady=8)
 
+    # -- Alerts tab ----------------------------------------------------------------------
+
+    def _build_alerts(self, parent: ttk.Frame) -> None:
+        holder = ttk.Frame(parent)
+        holder.pack(anchor="nw", padx=12, pady=12, fill="x")
+
+        self._alert_enabled = tk.BooleanVar()
+        self._work_start = tk.StringVar()
+        self._work_end = tk.StringVar()
+        self._work_days = [tk.BooleanVar() for _ in range(7)]
+        # Whole seconds: the config stores floats, but nobody sets an alert to 6.5 seconds and
+        # a spinbox showing "6.0" just looks like a bug.
+        self._alert_seconds = tk.IntVar()
+        self._alert_cooldown = tk.IntVar()
+
+        ttk.Checkbutton(
+            holder,
+            text="Play a GIF when a Teams notification arrives outside working hours",
+            variable=self._alert_enabled,
+            command=self._on_alert_enabled_changed,
+        ).grid(row=0, column=0, columnspan=4, sticky="w")
+
+        ttk.Label(
+            holder,
+            text=("Teams logs how many notifications are unread, not who sent them, so the\n"
+                  "board can say that something arrived but never what or from whom."),
+            foreground="#666",
+            justify="left",
+        ).grid(row=1, column=0, columnspan=4, sticky="w", pady=(2, 12))
+
+        # -- the window
+        ttk.Label(holder, text="Working hours").grid(row=2, column=0, sticky="w")
+        times = ttk.Frame(holder)
+        times.grid(row=2, column=1, columnspan=3, sticky="w")
+        ttk.Entry(times, textvariable=self._work_start, width=7).pack(side="left")
+        ttk.Label(times, text="to").pack(side="left", padx=6)
+        ttk.Entry(times, textvariable=self._work_end, width=7).pack(side="left")
+        ttk.Button(times, text="Apply", command=self._on_hours_changed).pack(
+            side="left", padx=(8, 0)
+        )
+
+        self._hours_note = ttk.Label(holder, text="", foreground="#666")
+        self._hours_note.grid(row=3, column=1, columnspan=3, sticky="w", pady=(2, 0))
+
+        ttk.Label(holder, text="Working days").grid(row=4, column=0, sticky="w", pady=(10, 0))
+        days = ttk.Frame(holder)
+        days.grid(row=4, column=1, columnspan=3, sticky="w", pady=(10, 0))
+        for index, name in enumerate(("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")):
+            ttk.Checkbutton(
+                days, text=name, variable=self._work_days[index], command=self._on_days_changed,
+            ).pack(side="left", padx=(0, 8))
+
+        ttk.Label(holder, text="Show for (s)").grid(row=5, column=0, sticky="w", pady=(10, 0))
+        ttk.Spinbox(
+            holder, from_=1, to=60, increment=1, textvariable=self._alert_seconds, width=8,
+            command=self._on_alert_timing_changed,
+        ).grid(row=5, column=1, sticky="w", pady=(10, 0))
+
+        ttk.Label(holder, text="Wait between alerts (s)").grid(
+            row=6, column=0, sticky="w", pady=(10, 0)
+        )
+        ttk.Spinbox(
+            holder, from_=0, to=3600, increment=10, textvariable=self._alert_cooldown, width=8,
+            command=self._on_alert_timing_changed,
+        ).grid(row=6, column=1, sticky="w", pady=(10, 0))
+
+        # -- the GIF
+        ttk.Separator(holder, orient="horizontal").grid(
+            row=7, column=0, columnspan=4, sticky="ew", pady=16
+        )
+
+        ttk.Label(holder, text="The GIF").grid(row=8, column=0, sticky="w")
+        gif_buttons = ttk.Frame(holder)
+        gif_buttons.grid(row=8, column=1, columnspan=3, sticky="w")
+        self._choose_gif = ttk.Button(
+            gif_buttons, text="Choose GIF...", command=self._on_choose_gif
+        )
+        self._choose_gif.pack(side="left")
+        ttk.Button(gif_buttons, text="Test alert now", command=self.worker.alert_now).pack(
+            side="left", padx=(6, 0)
+        )
+
+        self._gif_progress = ttk.Progressbar(holder, orient="horizontal", length=260, maximum=100)
+        self._gif_progress.grid(row=9, column=1, columnspan=3, sticky="w", pady=(8, 0))
+        self._gif_status = ttk.Label(holder, text="", foreground="#666")
+        self._gif_status.grid(row=10, column=1, columnspan=3, sticky="w", pady=(4, 0))
+
+        ttk.Label(
+            holder,
+            text=(
+                "Your GIF is resized to 240x240, put on a single palette and trimmed to fit,\n"
+                "then sent over USB. The board composites nothing -- it draws a scanline at a\n"
+                "time and has no canvas -- so the file is re-encoded rather than passed through.\n"
+                "Expect around 15 seconds. The bundled GIF stays flashed as the fallback for\n"
+                "when no PC is attached."
+            ),
+            foreground="#666",
+            justify="left",
+        ).grid(row=11, column=0, columnspan=4, sticky="w", pady=(16, 0))
+
+    # -- Alerts tab handlers ---------------------------------------------------------------
+
+    def _on_alert_enabled_changed(self) -> None:
+        self.config.alert_enabled = bool(self._alert_enabled.get())
+        if not self._building:
+            self.config.save()
+
+    def _on_hours_changed(self) -> None:
+        if self._building:
+            return
+        self.config.work_start = self._work_start.get().strip()
+        self.config.work_end = self._work_end.get().strip()
+        self.config.save()
+        self._refresh_hours_note()
+
+    def _on_days_changed(self) -> None:
+        if self._building:
+            return
+        self.config.work_days = [i for i, var in enumerate(self._work_days) if var.get()]
+        self.config.save()
+        self._refresh_hours_note()
+
+    def _on_alert_timing_changed(self) -> None:
+        if self._building:
+            return
+        try:
+            self.config.alert_seconds = float(self._alert_seconds.get())
+            self.config.alert_cooldown_seconds = float(self._alert_cooldown.get())
+        except (tk.TclError, ValueError):
+            return
+        self.config.save()
+
+    def _refresh_hours_note(self) -> None:
+        """Say back what the window was understood to mean, wrap and all.
+
+        The overnight case is the one worth confirming out loud: 22:00 to 06:00 is a window that
+        belongs to the day it opens on, and nobody should have to guess that from two entry boxes.
+        """
+        window = work_hours.Window.from_config(self.config)
+        if not window.days:
+            note = "no working days selected: every notification counts as out of hours"
+        else:
+            note = f"{window.start:%H:%M} to {window.end:%H:%M}"
+            if window.wraps:
+                note += " (overnight, counted from the day it starts)"
+        self._hours_note.configure(text=note)
+
+    def _on_choose_gif(self) -> None:
+        path = filedialog.askopenfilename(
+            parent=self.root,
+            title="Choose an alert GIF",
+            filetypes=[("Animated GIF", "*.gif"), ("All files", "*.*")],
+        )
+        if not path:
+            return
+        source = Path(path)
+        try:
+            size = source.stat().st_size
+        except OSError as exc:
+            messagebox.showerror("Alert GIF", str(exc), parent=self.root)
+            return
+        # Only a hint: the re-encode usually brings a big source well under the cap on its own.
+        if size > GIF_MAX_BYTES * 4:
+            rough = estimate_seconds(GIF_MAX_BYTES)
+            if not messagebox.askokcancel(
+                "Alert GIF",
+                f"{source.name} is {size / 1024:,.0f} KB. It will be shrunk to fit, which may "
+                f"cost frames or colours, and sending it takes up to about {rough:.0f} seconds."
+                "\n\nGo ahead?",
+                parent=self.root,
+            ):
+                return
+
+        self._choose_gif.configure(state="disabled")
+        self._gif_progress.configure(value=0)
+        self._gif_status.configure(text=f"Preparing {source.name}...", foreground="#666")
+        # Both callbacks fire on the worker thread, so they are bounced back through the pump
+        # rather than touching a widget from there.
+        self.worker.upload_gif(
+            source,
+            on_progress=lambda sent, total: self.post(
+                lambda: self._on_gif_progress(sent, total)
+            ),
+            on_done=lambda stats, error: self.post(
+                lambda: self._on_gif_done(source, stats, error)
+            ),
+        )
+
+    def _on_gif_progress(self, sent: int, total: int) -> None:
+        self._gif_progress.configure(value=100 * sent / max(1, total))
+        self._gif_status.configure(text=f"Sending... {sent // 1024} of {total // 1024} KB")
+
+    def _on_gif_done(self, source, stats, error) -> None:
+        self._choose_gif.configure(state="normal")
+        if error is not None:
+            self._gif_progress.configure(value=0)
+            self._gif_status.configure(text=f"{source.name}: {error}", foreground="#a00")
+            return
+        self._gif_progress.configure(value=100)
+        detail = f"{source.name}: {stats.width}x{stats.height}, {stats.frames} frames"
+        if stats.dropped_frames:
+            detail += f", {stats.dropped_frames} dropped"
+        self._gif_status.configure(text=detail + " -- on the board", foreground="#060")
+
     def _radio_group(self, parent, row, title, variable, values, label, command):
         ttk.Label(parent, text=title).grid(row=row, column=0, sticky="nw", pady=(10, 0))
         holder = ttk.Frame(parent)
@@ -367,6 +579,7 @@ class App:
 
         self._connection = ttk.Label(holder, text="")
         self._connection.pack(anchor="w")
+        self._connection_text = ""
 
         self._startup = tk.BooleanVar()
         ttk.Checkbutton(
@@ -409,10 +622,19 @@ class App:
             self._fade.set(bool(self.config.transition_ms))
             self._clock.set(self.config.send_clock)
             self._startup.set(self.config.start_with_windows)
+            self._alert_enabled.set(self.config.alert_enabled)
+            self._work_start.set(self.config.work_start)
+            self._work_end.set(self.config.work_end)
+            working = work_hours.normalise_days(self.config.work_days)
+            for index, var in enumerate(self._work_days):
+                var.set(index in working)
+            self._alert_seconds.set(round(self.config.alert_seconds))
+            self._alert_cooldown.set(round(self.config.alert_cooldown_seconds))
         finally:
             self._building = False
         self._refresh_statuses()
         self._refresh_connection()
+        self._refresh_hours_note()
 
     def _selected_language(self) -> str:
         chosen = self._edit_language.get()
@@ -464,10 +686,18 @@ class App:
         return lines[0] if lines else status_label(self._selected_status(), self.config.language)
 
     def _refresh_connection(self) -> None:
+        """Repaint the Device tab's status line. Cheap, and called from the pump -- so pressing
+        Reconnect visibly does something even when the answer is that it still cannot connect."""
         port = self.worker.link.port
-        self._connection.configure(
-            text=f"Connected on {port}" if port else "No board found yet - it is probed every few seconds"
-        )
+        if port:
+            text = f"Connected on {port}"
+        elif self.worker.link.last_error:
+            text = f"No board: {self.worker.link.last_error}"
+        else:
+            text = "Looking for the board - it is probed every few seconds"
+        if text != self._connection_text:
+            self._connection_text = text
+            self._connection.configure(text=text)
 
     # -- Messages tab handlers -----------------------------------------------------------
 

@@ -9,14 +9,17 @@ from __future__ import annotations
 import argparse
 import logging
 import sys
+import tempfile
 import threading
 import time
+from datetime import datetime
 from pathlib import Path
 
 if __package__ in (None, ""):  # allow both `python pc_app/main.py` and `python -m pc_app.main`
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
     __package__ = "pc_app"
 
+from pc_app import gif_upload, single_instance, work_hours
 from pc_app.config import Config, config_dir, config_path
 from pc_app.i18n import DISPLAY_MODES, ORIENTATIONS, TONES, normalise, normalise_tone
 from pc_app.phrases import MAX_PHRASE_CHARS, PhraseBank
@@ -45,14 +48,23 @@ class Worker:
         self.phrases = phrases if phrases is not None else PhraseBank.load()
 
         self._stop = threading.Event()
+        #: Raised by the tray or the settings window; acted on at the top of the next tick.
+        self._reconnect = threading.Event()
         self._was_connected = False
         self._last_sent_status: Status | None = None
         self._last_status_sent_at = 0.0
         self._last_caption_sent_at = 0.0
         self._last_caption = ""
         self._last_clock = ""
+        #: Notification bookkeeping for the out-of-hours alert. The watcher counts arrivals;
+        #: this is how many of them we have already acted on.
+        self._last_unread_events = 0
+        self._last_alert_at = 0.0
         #: Set by the tray so the next tick pushes a NEXT command.
         self._pending_commands: list[str] = []
+        #: Work that has to happen on this thread because it owns the serial port -- currently
+        #: only a GIF upload, which holds the port for its whole duration.
+        self._pending_tasks: list = []
         self._lock = threading.Lock()
         #: Called with the published Status whenever it changes, so the tray icon can follow.
         self.on_status_change = lambda status: None
@@ -77,6 +89,8 @@ class Worker:
         if teams_is_running() is False:
             log.warning("Teams does not appear to be running; presence may be stale")
         self.engine.observe(state.availability, state.in_call, state.log_found)
+        # prime() does not raise events, but read the counter anyway rather than assuming a zero.
+        self._last_unread_events = state.unread_events
 
     def stop(self) -> None:
         self._stop.set()
@@ -99,6 +113,11 @@ class Worker:
         with self._lock:
             self._pending_commands.append(line)
 
+    def queue_task(self, task) -> None:
+        """Run *task* on the worker thread, next time it ticks with a live link."""
+        with self._lock:
+            self._pending_tasks.append(task)
+
     def set_override(self, status: Status | None) -> None:
         self.engine.set_override(status)
         log.info("manual override %s", status or "cleared")
@@ -120,15 +139,72 @@ class Worker:
         self.refresh_caption()
         log.info("tone %s", self.config.tone)
 
+    def alert_now(self) -> None:
+        """Play the alert GIF immediately, whatever the clock says.
+
+        The settings window's test button. Deliberately skips the working-hours check and the
+        cooldown -- the point of pressing it is to see the thing.
+        """
+        self._last_alert_at = time.monotonic()
+        self.queue_command(f"ALERT:{self._alert_ms()}")
+
+    def _alert_ms(self) -> int:
+        # Clamped to the same range the firmware clamps to, so what the GUI shows is what happens.
+        return int(min(60.0, max(0.2, self.config.alert_seconds)) * 1000)
+
+    def _maybe_alert(self, arrived: int) -> None:
+        """Decide whether *arrived* notifications deserve the GIF.
+
+        The whole feature is here: something arrived, it is outside the hours you said you work,
+        and we have not just done this.
+        """
+        if not self.config.alert_enabled:
+            return
+        # Local wall-clock time, because the working window is something the user set by looking
+        # at their own clock.
+        if work_hours.is_within(datetime.now(), self.config):
+            log.debug("%d notification(s), but inside working hours", arrived)
+            return
+
+        now = time.monotonic()
+        waited = now - self._last_alert_at
+        if self._last_alert_at and waited < self.config.alert_cooldown_seconds:
+            log.debug(
+                "%d notification(s) out of hours, but only %.0fs into a %.0fs cooldown",
+                arrived, waited, self.config.alert_cooldown_seconds,
+            )
+            return
+
+        self._last_alert_at = now
+        log.info("out-of-hours notification -> alert for %dms", self._alert_ms())
+        self.queue_command(f"ALERT:{self._alert_ms()}")
+
     def reconnect(self) -> None:
-        log.info("reconnecting on request")
-        self.link.close()
-        self._was_connected = False
+        """Ask for an immediate rescan.
+
+        Called from the tray thread and from Tk, neither of which may touch the port -- it belongs
+        to the worker thread. So this only raises a flag; tick() does the work.
+        """
+        log.info("reconnect requested")
+        self._reconnect.set()
 
     # -- the work ------------------------------------------------------------------------
 
     def tick(self) -> None:
+        if self._reconnect.is_set():
+            self._reconnect.clear()
+            # Clears the retry backoff and discards a scan already in flight, so the button means
+            # "look again now" rather than "look again whenever you were going to anyway".
+            log.info("reconnecting on request")
+            self.link.force_rescan()
+            self._was_connected = False
+
         state = self.watcher.poll()
+        # Advance the counter whether or not a board is listening: an alert missed while the
+        # cable was out is an alert that had nowhere to go, not one still owed.
+        arrived = state.unread_events - self._last_unread_events
+        self._last_unread_events = state.unread_events
+
         previous = self.engine.status
         status = self.engine.observe(state.availability, state.in_call, state.log_found)
         if status != previous:
@@ -153,8 +229,16 @@ class Worker:
         if not connected:
             return
 
+        if arrived:
+            self._maybe_alert(arrived)
+
         for line in self._drain_commands():
             self.link.send(line)
+
+        for task in self._drain_tasks():
+            # A task owns the port for as long as it runs (an upload is tens of seconds), and its
+            # own traffic feeds the board's watchdog, so no heartbeat is owed meanwhile.
+            task()
 
         now = time.monotonic()
         stale = now - self._last_status_sent_at >= self.config.heartbeat_seconds
@@ -216,10 +300,40 @@ class Worker:
         self._last_caption = folded
         self._last_caption_sent_at = time.monotonic()
 
+    def upload_gif(self, source, on_progress=None, on_done=None) -> None:
+        """Re-encode *source* and send it to the board, replacing the alert GIF.
+
+        Returns at once; everything happens on the worker thread. *on_done* is called with
+        (GifStats, None) on success or (None, exception) on failure, and is also called on the
+        worker thread -- a GUI caller should marshal it back to its own.
+        """
+        def task() -> None:
+            stats = None
+            try:
+                with tempfile.TemporaryDirectory() as scratch:
+                    prepared = Path(scratch) / "alert.gif"
+                    stats = gif_upload.prepare_gif(source, prepared)
+                    gif_upload.send_gif(self.link, prepared.read_bytes(), on_progress)
+            except Exception as exc:
+                log.warning("GIF upload failed: %s", exc)
+                if on_done is not None:
+                    on_done(None, exc)
+                return
+            log.info("uploaded %s (%d bytes) to the board", source, stats.size_bytes)
+            if on_done is not None:
+                on_done(stats, None)
+
+        self.queue_task(task)
+
     def _drain_commands(self) -> list[str]:
         with self._lock:
             commands, self._pending_commands = self._pending_commands, []
         return commands
+
+    def _drain_tasks(self) -> list:
+        with self._lock:
+            tasks, self._pending_tasks = self._pending_tasks, []
+        return tasks
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -279,6 +393,13 @@ def setup_logging(verbose: bool) -> Path | None:
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     log_path = setup_logging(args.verbose)
+
+    # --dry-run never opens the port, so two of those are harmless. Anything else would be a
+    # second worker racing the first for the board; see pc_app/single_instance.py.
+    if not args.dry_run and not single_instance.claim():
+        log.error("another copy of the app is already running, and it owns the board")
+        single_instance.warn_already_running()
+        return 3
 
     config = Config.load()
     if args.port:

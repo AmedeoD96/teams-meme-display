@@ -290,12 +290,18 @@ def test_a_short_caption_gets_the_big_font():
 
 
 def test_a_long_caption_drops_to_the_small_font_rather_than_being_cut():
-    """The band trades size for completeness; losing half a joke is worse than losing 10px."""
+    """The band trades size for completeness; losing half a joke is worse than losing 10px.
+
+    The step down is a last resort, not the normal path: the big font is allowed four lines, which
+    covers every phrase in both shipped banks. This is about what happens past that."""
     from pc_app.render import CAPTION_FONT_SMALL, CAPTION_LINES_BIG, layout_caption
 
-    # The longest phrase we ship. At the big font it would need more than the three lines the
-    # band has room for, so the band steps down a size instead of losing the punchline.
-    long_one = "Inattivo. Come il server di build. Come le mie speranze."
+    # Longer than anything we ship: with four big lines to play with, no real phrase reaches the
+    # fallback any more, so this has to be built on purpose to get there.
+    long_one = (
+        "Inattivo. Come il server di build, come la pipeline di rilascio, "
+        "come le mie speranze di finire questo sprint entro venerdi'."
+    )
     lines, size, _, truncated = layout_caption(long_one, 240)
     assert size == CAPTION_FONT_SMALL, "should have fallen back rather than truncating"
     assert not truncated
@@ -311,6 +317,26 @@ def test_a_long_caption_drops_to_the_small_font_rather_than_being_cut():
         long_one, lambda t: scratch.textlength(t, font=big), 240, max_lines=99
     )
     assert len(at_big) > CAPTION_LINES_BIG
+
+
+def test_the_band_never_outgrows_the_space_the_scene_keeps_clear():
+    """CAPTION_RESERVE is what the mascot and the meme art stay out of. Either font is allowed to
+    fill it, and neither may exceed it -- the scene is laid out once and cannot give ground."""
+    from pc_app import render
+
+    big = render.CAPTION_LINES_BIG * render.CAPTION_LINE_H_BIG + 2 * render.CAPTION_PAD_Y
+    small = render.CAPTION_LINES_SMALL * render.CAPTION_LINE_H_SMALL + 2 * render.CAPTION_PAD_Y
+    assert big == render.CAPTION_RESERVE
+    assert small <= render.CAPTION_RESERVE
+
+
+def test_the_wrap_can_still_tell_a_fit_from_a_truncation():
+    """layout_caption() decides by wrapping into more slots than the big font is allowed and
+    counting what comes back. Size the array down to the budget itself and the probe can never
+    report an overflow, so an over-long caption would be drawn big and silently cut."""
+    from pc_app import render
+
+    assert render.CAPTION_MAX_LINES > render.CAPTION_LINES_BIG
 
 
 def test_every_shipped_phrase_fits_the_band_without_being_cut():

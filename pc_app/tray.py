@@ -138,7 +138,13 @@ def build_icon(
         if worker.engine.override is not None:
             label += f"  ({tr('forced', lang())})"
         port = worker.link.port
-        return f"{label} - {port}" if port else f"{label} - {tr('not_connected', lang())}"
+        if port:
+            return f"{label} - {port}"
+        # The reason is deliberately raw: it names a COM port or a Windows error, and translating
+        # it would only make it harder to match against the log.
+        state = tr("not_connected", lang())
+        reason = worker.link.last_error
+        return f"{label} - {state}: {reason}" if reason else f"{label} - {state}"
 
     def on_next(_icon, _item):
         worker.queue_command("NEXT")

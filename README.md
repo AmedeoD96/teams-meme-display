@@ -189,11 +189,50 @@ you can see what a phrase will look like before it gets there.
   screen straight away.
 - **Look** — display mode, tone, language, orientation, brightness, rotation, caption fade, clock.
   Every change is sent to the board as you make it.
+- **Alerts** — the out-of-hours GIF: working hours and days, how long it shows, how long to
+  wait before showing it again, and **Choose GIF...** to put your own on the board.
 - **Device** — connection state, reconnect, start with Windows, and the config folder.
 
 Edits take effect on the next rotation tick. There is nothing to rebuild and nothing to reflash,
 because the phrases live on the PC and are pushed over USB — see
 [Who owns the words](docs/PROTOCOL.md#who-owns-the-words).
+
+## Out-of-hours alerts
+
+Set your working hours in the **Alerts** tab. A Teams notification that arrives outside them
+plays a GIF on the board for a few seconds, and then the status display comes back.
+
+![The alert GIF](docs/images/alert-gif.png)
+
+The trigger is the unread notification count in the Teams log going *up*. That is genuinely all
+Teams records — there is no sender and no message text in the log at all — so the board can tell
+you something arrived and never what it was, or who from. Worth knowing before you rely on it:
+
+- Teams writes nothing while it has only ever run in the background. Same constraint as presence
+  — see [Troubleshooting](#troubleshooting).
+- If you read a message the instant it lands, the count may never rise, and nothing fires.
+- Not every kind of notification bumps the badge count.
+
+A window whose end is *earlier* than its start runs past midnight, so `22:00`–`06:00` works and
+belongs to the day it opened on. With no days ticked, everything counts as out of hours. The
+cooldown stops a burst of messages replaying the GIF over and over.
+
+### Your own GIF
+
+**Choose GIF...** re-encodes whatever you pick and sends it over USB — no reflash, the same way
+phrases work. Expect roughly fifteen seconds, with a progress bar.
+
+It is always re-encoded rather than passed through, and that is not just about size: the board
+draws a scanline at a time and keeps no canvas, so a GIF with per-frame colour palettes would
+render as garbage. Yours is resized to fit 240×240, put on a single palette shared by every
+frame, and trimmed — frames first, then colours — until it fits. It is centred on the screen, so
+one file works in both orientations.
+
+Nothing is committed on the board until the length and checksum both verify, so a cable pulled
+mid-upload costs you the new GIF and not the old one.
+
+The bundled GIF (drawn by `tools/make_alert_gif.py`, flashed by `build_memes.py`) stays on the
+board as the fallback for when no PC is attached.
 
 ## Standalone .exe
 
@@ -300,6 +339,12 @@ That is the one case where you still need `build_memes.py` and `pio run -t uploa
 | `display_mode` | `"mascot"` | `mascot`, `image` (meme + caption) or `text` (caption only) |
 | `tone` | `"normal"` | Phrasing register: `normal`, `sarcastic` or `retriever` |
 | `transition_ms` | `400` | Caption cross-fade duration; `0` switches instantly |
+| `alert_enabled` | `true` | Play a GIF on an out-of-hours notification |
+| `work_start` | `"09:00"` | Start of the working window |
+| `work_end` | `"18:00"` | End of it; a value below `work_start` wraps past midnight |
+| `work_days` | `[0,1,2,3,4]` | Working weekdays, Monday is `0` |
+| `alert_seconds` | `6` | How long the GIF plays |
+| `alert_cooldown_seconds` | `60` | Minimum gap between two alerts |
 
 ## Testing
 
@@ -351,6 +396,9 @@ pc_app/mascot_faces.py  Every expression, as parameters -- the source of truth f
 pc_app/render.py Draws a panel frame on the PC, for the previews and the GUI
 firmware/        PlatformIO project for the CYD (TFT_eSPI + TJpg_Decoder, no LVGL)
 firmware/src/mascot.cpp  The character, composed from shapes into a sprite
+pc_app/work_hours.py    The working-hours window, midnight wrap included
+pc_app/gif_upload.py    Re-encodes an alert GIF and streams it to the board
+firmware/src/alert.cpp  Plays the alert GIF, and receives an uploaded one
 tools/           Meme pack builder, mascot table generator, placeholder art
 captions/        Phrase banks, per language, tone and status
 docs/images/     README screenshots (regenerate: tools/make_docs_images.py)

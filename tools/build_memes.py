@@ -50,11 +50,15 @@ from pc_app.render import (  # noqa: E402
     status_colour,
     wrap_caption,
 )
+from pc_app.gif_upload import GifTooBig, prepare_gif  # noqa: E402
 from pc_app.i18n import TONES  # noqa: E402
 from pc_app.text import to_display_ascii  # noqa: E402
 
 MEME_SRC = REPO / "memes"
 CAPTION_SRC = REPO / "captions"
+#: The out-of-hours alert GIF, drawn by tools/make_alert_gif.py. Flashed as the fallback for a
+#: board with no PC attached, and replaced in place by an upload from the settings window.
+ALERT_SRC = REPO / "assets" / "alert.gif"
 DATA_OUT = REPO / "firmware" / "data"
 PREVIEW_OUT = REPO / "preview"
 
@@ -181,6 +185,7 @@ def build(args: argparse.Namespace) -> int:
     )
 
     if args.clean:
+        (DATA_OUT / "alert.gif").unlink(missing_ok=True)
         for path in (DATA_OUT / "memes", DATA_OUT / "captions", PREVIEW_OUT):
             if path.exists():
                 shutil.rmtree(path)
@@ -264,6 +269,10 @@ def build(args: argparse.Namespace) -> int:
     total += caption_bytes
     problems.extend(caption_problems)
 
+    alert_bytes, alert_problems = _build_alert()
+    total += alert_bytes
+    problems.extend(alert_problems)
+
     _report(orientations, counts, total, problems, args)
     return 1 if problems or total > FS_BUDGET_BYTES else 0
 
@@ -276,6 +285,28 @@ def _first_caption(status: str, language: str, tone: str = FLASHED_TONE) -> str:
         if line.strip():
             return to_display_ascii(line.strip())[0]
     return status.replace("_", " ").upper()
+
+
+def _build_alert() -> tuple[int, list[str]]:
+    """Re-encode the alert GIF into the filesystem image.
+
+    Through the same prepare_gif() the settings window uses for an upload, so the flashed default
+    and anything the user sends later are constrained identically -- one code path, one set of
+    limits, no way for the two to drift.
+    """
+    if not ALERT_SRC.exists():
+        # Not a problem: a board with no alert GIF simply logs and shows nothing when one fires.
+        print(f"no {ALERT_SRC.relative_to(REPO)} -- run tools/make_alert_gif.py to draw one")
+        return 0, []
+    try:
+        stats = prepare_gif(ALERT_SRC, DATA_OUT / "alert.gif")
+    except (GifTooBig, OSError, ValueError) as exc:
+        return 0, [f"{ALERT_SRC.relative_to(REPO)}: {exc}"]
+    print(
+        f"alert gif: {stats.width}x{stats.height}, {stats.frames} frames, "
+        f"{stats.size_bytes:,} bytes"
+    )
+    return stats.size_bytes, []
 
 
 def _copy_captions() -> tuple[int, list[str]]:
