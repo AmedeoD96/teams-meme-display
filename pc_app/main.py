@@ -50,6 +50,9 @@ class Worker:
         self._stop = threading.Event()
         #: Raised by the tray or the settings window; acted on at the top of the next tick.
         self._reconnect = threading.Event()
+        #: What the board has said about its alert GIF, or None while it has said nothing. Only
+        #: ever set from what the board actually reported -- there is no command to ask it.
+        self._board_has_gif: bool | None = None
         self._was_connected = False
         self._last_sent_status: Status | None = None
         self._last_status_sent_at = 0.0
@@ -160,6 +163,12 @@ class Worker:
         detail = event.partition(":")[2]
         if not ok:
             log.warning("the board could not play the alert: %s", detail or "no reason given")
+        # The only two answers that say anything about the file: it played, so there is one, or
+        # the board has none at all. "uploading" and "decode" say nothing new either way.
+        if ok:
+            self._board_has_gif = True
+        elif detail.startswith("nogif"):
+            self._board_has_gif = False
         if self.on_alert_result is not None:
             self.on_alert_result(ok, detail)
 
@@ -170,14 +179,14 @@ class Worker:
     def _maybe_alert(self, arrived: int) -> None:
         """Decide whether *arrived* notifications deserve the GIF.
 
-        The whole feature is here: something arrived, it is outside the hours you said you work,
-        and we have not just done this.
+        The whole feature is here: something arrived, it is outside the hours you said you work
+        -- or you have asked for every notification regardless -- and we have not just done this.
         """
         if not self.config.alert_enabled:
             return
-        # Local wall-clock time, because the working window is something the user set by looking
-        # at their own clock.
-        if work_hours.is_within(datetime.now(), self.config):
+        # Local wall-clock time, because the working day is something the user set by looking at
+        # their own clock. alert_always skips the question entirely.
+        if not self.config.alert_always and work_hours.is_within(datetime.now(), self.config):
             log.debug("%d notification(s), but inside working hours", arrived)
             return
 
@@ -185,13 +194,14 @@ class Worker:
         waited = now - self._last_alert_at
         if self._last_alert_at and waited < self.config.alert_cooldown_seconds:
             log.debug(
-                "%d notification(s) out of hours, but only %.0fs into a %.0fs cooldown",
+                "%d notification(s), but only %.0fs into a %.0fs cooldown",
                 arrived, waited, self.config.alert_cooldown_seconds,
             )
             return
 
         self._last_alert_at = now
-        log.info("out-of-hours notification -> alert for %dms", self._alert_ms())
+        reason = "notification" if self.config.alert_always else "out-of-hours notification"
+        log.info("%s -> alert for %dms", reason, self._alert_ms())
         self.queue_command(f"ALERT:{self._alert_ms()}")
 
     def reconnect(self) -> None:
@@ -239,6 +249,8 @@ class Worker:
             self.link.send(f"TRANSITION:{self.config.transition_ms}")
             self._last_sent_status = None
             self._last_clock = ""
+            # Whatever the last board said about its GIF does not carry over to this one.
+            self._board_has_gif = None
             self.refresh_caption()
         self._was_connected = connected
         if not connected:
@@ -337,6 +349,8 @@ class Worker:
                     on_done(None, exc)
                 return
             log.info("uploaded %s (%d bytes) to the board", source, stats.size_bytes)
+            # send_gif only returns on EVT:GIFOK, so the board has verified and committed it.
+            self._board_has_gif = True
             if on_done is not None:
                 on_done(stats, None)
 

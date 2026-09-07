@@ -265,6 +265,11 @@ class TeamsLogWatcher:
         #: other line.
         self._have_notification_action = False
 
+    @property
+    def current_log(self) -> Path | None:
+        """The main log being tailed, or None before one is found. For the Device tab."""
+        return self._main_tail.path if self._main_tail is not None else None
+
     # -- file rotation -------------------------------------------------------------------
 
     def _rotate(self, tail: Tail | None, pattern: re.Pattern[str]) -> tuple[Tail | None, bool]:

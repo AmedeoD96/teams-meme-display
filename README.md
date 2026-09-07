@@ -189,9 +189,12 @@ you can see what a phrase will look like before it gets there.
   screen straight away.
 - **Look** — display mode, tone, language, orientation, brightness, rotation, caption fade, clock.
   Every change is sent to the board as you make it.
-- **Alerts** — the out-of-hours GIF: working hours and days, how long it shows, how long to
-  wait before showing it again, and **Choose GIF...** to put your own on the board.
-- **Device** — connection state, reconnect, start with Windows, and the config folder.
+- **Alerts** — the out-of-hours GIF: the morning and afternoon blocks, the working days, how long
+  it shows, how long to wait before showing it again, and **Choose GIF...** to put your own on the
+  board. A note under the hours says back what they were understood to mean, including which gap
+  now counts as out of hours.
+- **Device** — a health block covering everything an alert depends on, plus reconnect, start with
+  Windows, and the config folder. See [Why the alert did nothing](#why-the-alert-did-nothing).
 
 Edits take effect on the next rotation tick. There is nothing to rebuild and nothing to reflash,
 because the phrases live on the PC and are pushed over USB — see
@@ -201,6 +204,11 @@ because the phrases live on the PC and are pushed over USB — see
 
 Set your working hours in the **Alerts** tab. A Teams notification that arrives outside them
 plays a GIF on the board for a few seconds, and then the status display comes back.
+
+The day is two blocks — a **morning** and an **afternoon** — so the break between them counts as
+out of hours too. With the defaults, 9:00 AM to 1:00 PM and 2:00 PM to 6:00 PM, a message that
+lands at 1:30 PM gets the GIF like an evening one would. Leave the afternoon blank for a single
+continuous day running from the morning start to the morning end.
 
 ![The alert GIF](docs/images/alert-gif.png)
 
@@ -213,9 +221,31 @@ you something arrived and never what it was, or who from. Worth knowing before y
 - If you read a message the instant it lands, the count may never rise, and nothing fires.
 - Not every kind of notification bumps the badge count.
 
-A window whose end is *earlier* than its start runs past midnight, so `22:00`–`06:00` works and
-belongs to the day it opened on. With no days ticked, everything counts as out of hours. The
-cooldown stops a burst of messages replaying the GIF over and over.
+If you would rather not think about hours at all, tick **Alert for every notification, even
+during working hours** on the Alerts tab. Every arrival then plays the GIF and the blocks below
+are ignored — the cooldown still applies, so a burst does not loop it.
+
+Times are shown and stored as `9:00 AM`, but a 24-hour value still reads, so a config written by
+an earlier version keeps working. A block whose end is *earlier* than its start runs past
+midnight, so `10:00 PM`–`6:00 AM` works and belongs to the day it opened on. With no days ticked,
+everything counts as out of hours. The cooldown stops a burst of messages replaying the GIF over
+and over.
+
+### Why the alert did nothing
+
+An alert has three independent dependencies, and they fail in ways that look identical from the
+outside — nothing happens. The **Device** tab shows all three at once rather than making you check
+a tab each:
+
+```
+Board      Connected on COM4
+Teams log  Reading MSTeams_2026-09-07_14-45-52.13.log
+Alert GIF  On the board
+```
+
+Green is working, red is not, grey is not known yet. **Alert GIF** stays grey until the board has
+actually said something about its file — there is no command to ask it, so nothing is claimed
+until an alert either plays or comes back `nogif`. **Test alert now** on the Alerts tab settles it.
 
 ### Your own GIF
 
@@ -343,11 +373,14 @@ That is the one case where you still need `build_memes.py` and `pio run -t uploa
 | `tone` | `"normal"` | Phrasing register: `normal`, `sarcastic` or `retriever` |
 | `transition_ms` | `400` | Caption cross-fade duration; `0` switches instantly |
 | `alert_enabled` | `true` | Play a GIF on an out-of-hours notification |
-| `work_start` | `"09:00"` | Start of the working window |
-| `work_end` | `"18:00"` | End of it; a value below `work_start` wraps past midnight |
-| `work_days` | `[0,1,2,3,4]` | Working weekdays, Monday is `0` |
+| `alert_always` | `false` | Alert on every notification, ignoring the hours below |
+| `work_start` | `"9:00 AM"` | Start of the morning block; `"09:00"` still reads |
+| `work_end` | `"1:00 PM"` | End of it; a value below `work_start` wraps past midnight |
+| `afternoon_start` | `"2:00 PM"` | Start of the afternoon block; blank for one continuous day |
+| `afternoon_end` | `"6:00 PM"` | End of it |
+| `work_days` | `[0,1,2,3,4]` | Working weekdays, Monday is `0`; shared by both blocks |
 | `alert_seconds` | `6` | How long the GIF plays |
-| `alert_cooldown_seconds` | `60` | Minimum gap between two alerts |
+| `alert_cooldown_seconds` | `15` | Minimum gap between two alerts |
 
 ## Testing
 
@@ -399,7 +432,7 @@ pc_app/mascot_faces.py  Every expression, as parameters -- the source of truth f
 pc_app/render.py Draws a panel frame on the PC, for the previews and the GUI
 firmware/        PlatformIO project for the CYD (TFT_eSPI + TJpg_Decoder, no LVGL)
 firmware/src/mascot.cpp  The character, composed from shapes into a sprite
-pc_app/work_hours.py    The working-hours window, midnight wrap included
+pc_app/work_hours.py    The working day: two blocks, the lunch gap, midnight wrap included
 pc_app/gif_upload.py    Re-encodes an alert GIF and streams it to the board
 firmware/src/alert.cpp  Plays the alert GIF, and receives an uploaded one
 tools/           Meme pack builder, mascot table generator, placeholder art

@@ -108,10 +108,14 @@ UserNotificationAction: {cloud_context: https://teams.microsoft.com, unread noti
 ```
 
 That is a count and nothing else. There is no sender and no message text anywhere in the log, so
-the alert can say that something arrived and never what it was. Three further limits are worth
-knowing: Teams writes nothing at all while it has never been foregrounded since launch (the same
-constraint presence has -- see Troubleshooting in the README), reading a message instantly can
-mean the count never rises, and not every kind of notification bumps the badge.
+by itself the alert can say that something arrived and never what it was. Three further limits
+are worth knowing: Teams writes nothing at all while it has never been foregrounded since launch
+(the same constraint presence has -- see Troubleshooting in the README), reading a message
+instantly can mean the count never rises, and not every kind of notification bumps the badge.
+
+The `alert_always` setting widens *when* that rise counts: with it on, every arrival fires
+`ALERT:` and the working day is not consulted at all. The protocol is unchanged either way --
+the board is told to play a GIF and never why.
 
 Playback is driven a frame at a time from `loop()` rather than by a blocking play call, so
 `serial_link::poll()` keeps running throughout and a `STATUS:` sent during an alert still

@@ -57,6 +57,17 @@ log = logging.getLogger(__name__)
 #: two the PC never sends, because their banks still need editing.
 EDITABLE = tuple(Status)
 
+#: The Device tab's health block, in the order the alert depends on them: the link carries it,
+#: the log triggers it, and the GIF is what actually plays.
+HEALTH_ROWS = (
+    ("board", "Board"),
+    ("log", "Teams log"),
+    ("gif", "Alert GIF"),
+)
+
+#: Health colours: settled and working, settled and broken, and nothing known yet.
+OK, BAD, UNKNOWN = "#060", "#a00", "#666"
+
 #: Panel sizes, matching ORIENTATIONS in tools/build_memes.py.
 PANEL_SIZE = {"landscape": (320, 240), "portrait": (240, 320)}
 #: Shown at 1:1. A blown-up preview would dominate the window, and life size is the honest way
@@ -372,73 +383,119 @@ class App:
         holder.pack(anchor="nw", padx=12, pady=12, fill="x")
 
         self._alert_enabled = tk.BooleanVar()
+        self._alert_always = tk.BooleanVar()
         self._work_start = tk.StringVar()
         self._work_end = tk.StringVar()
+        self._afternoon_start = tk.StringVar()
+        self._afternoon_end = tk.StringVar()
         self._work_days = [tk.BooleanVar() for _ in range(7)]
         # Whole seconds: the config stores floats, but nobody sets an alert to 6.5 seconds and
         # a spinbox showing "6.0" just looks like a bug.
         self._alert_seconds = tk.IntVar()
         self._alert_cooldown = tk.IntVar()
 
+        # Keeps the longest label in column 0 ("Wait between alerts (s)") off the control beside
+        # it, without padding every grid call individually.
+        holder.columnconfigure(0, pad=12)
+
+        # Rows are handed out by a running counter, the way _build_look does it. Hard-coded
+        # indices had to be renumbered by hand every time a control was added here, and the last
+        # renumber quietly dropped the note and the Morning row into the same cell.
+        row = 0
+
         ttk.Checkbutton(
             holder,
             text="Play a GIF when a Teams notification arrives outside working hours",
             variable=self._alert_enabled,
             command=self._on_alert_enabled_changed,
-        ).grid(row=0, column=0, columnspan=4, sticky="w")
+        ).grid(row=row, column=0, columnspan=4, sticky="w")
+        row += 1
+
+        ttk.Checkbutton(
+            holder,
+            text="Alert for every notification, even during working hours",
+            variable=self._alert_always,
+            command=self._on_alert_always_changed,
+        ).grid(row=row, column=0, columnspan=4, sticky="w")
+        row += 1
 
         ttk.Label(
             holder,
             text=("Teams logs how many notifications are unread, not who sent them, so the\n"
-                  "board can say that something arrived but never what or from whom."),
+                  "board can say that something arrived but never what it was, or who from."),
             foreground="#666",
             justify="left",
-        ).grid(row=1, column=0, columnspan=4, sticky="w", pady=(2, 12))
+        ).grid(row=row, column=0, columnspan=4, sticky="w", pady=(2, 12))
+        row += 1
 
-        # -- the window
-        ttk.Label(holder, text="Working hours").grid(row=2, column=0, sticky="w")
-        times = ttk.Frame(holder)
-        times.grid(row=2, column=1, columnspan=3, sticky="w")
-        ttk.Entry(times, textvariable=self._work_start, width=7).pack(side="left")
-        ttk.Label(times, text="to").pack(side="left", padx=6)
-        ttk.Entry(times, textvariable=self._work_end, width=7).pack(side="left")
-        ttk.Button(times, text="Apply", command=self._on_hours_changed).pack(
-            side="left", padx=(8, 0)
-        )
+        # -- the two blocks of the day. The break between them is what makes lunch count as
+        # out of hours, so they are two rows rather than one with a start and an end.
+        for label, start, end in (
+            ("Morning", self._work_start, self._work_end),
+            ("Afternoon", self._afternoon_start, self._afternoon_end),
+        ):
+            ttk.Label(holder, text=label).grid(row=row, column=0, sticky="w", pady=(0, 2))
+            times = ttk.Frame(holder)
+            times.grid(row=row, column=1, columnspan=3, sticky="w", pady=(0, 2))
+            for variable in (start, end):
+                entry = ttk.Entry(times, textvariable=variable, width=10)
+                # Enter or leaving the box applies, so a typed time is not silently left
+                # uncommitted when the Apply button goes unnoticed.
+                entry.bind("<Return>", lambda _event: self._on_hours_changed())
+                entry.bind("<FocusOut>", lambda _event: self._on_hours_changed())
+                entry.pack(side="left")
+                if variable is start:
+                    ttk.Label(times, text="to").pack(side="left", padx=6)
+            row += 1
 
-        self._hours_note = ttk.Label(holder, text="", foreground="#666")
-        self._hours_note.grid(row=3, column=1, columnspan=3, sticky="w", pady=(2, 0))
+        applied = ttk.Frame(holder)
+        applied.grid(row=row, column=1, columnspan=3, sticky="w", pady=(4, 0))
+        ttk.Button(applied, text="Apply", command=self._on_hours_changed).pack(side="left")
+        ttk.Label(
+            applied,
+            text="Leave the afternoon blank for one continuous day",
+            foreground="#666",
+        ).pack(side="left", padx=(8, 0))
+        row += 1
 
-        ttk.Label(holder, text="Working days").grid(row=4, column=0, sticky="w", pady=(10, 0))
+        self._hours_note = ttk.Label(holder, text="", foreground="#666", justify="left")
+        self._hours_note.grid(row=row, column=1, columnspan=3, sticky="w", pady=(6, 0))
+        row += 1
+
+        ttk.Label(holder, text="Working days").grid(row=row, column=0, sticky="w", pady=(10, 0))
         days = ttk.Frame(holder)
-        days.grid(row=4, column=1, columnspan=3, sticky="w", pady=(10, 0))
+        days.grid(row=row, column=1, columnspan=3, sticky="w", pady=(10, 0))
         for index, name in enumerate(("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")):
             ttk.Checkbutton(
                 days, text=name, variable=self._work_days[index], command=self._on_days_changed,
             ).pack(side="left", padx=(0, 8))
+        row += 1
 
-        ttk.Label(holder, text="Show for (s)").grid(row=5, column=0, sticky="w", pady=(10, 0))
-        ttk.Spinbox(
-            holder, from_=1, to=60, increment=1, textvariable=self._alert_seconds, width=8,
-            command=self._on_alert_timing_changed,
-        ).grid(row=5, column=1, sticky="w", pady=(10, 0))
-
-        ttk.Label(holder, text="Wait between alerts (s)").grid(
-            row=6, column=0, sticky="w", pady=(10, 0)
-        )
-        ttk.Spinbox(
-            holder, from_=0, to=3600, increment=10, textvariable=self._alert_cooldown, width=8,
-            command=self._on_alert_timing_changed,
-        ).grid(row=6, column=1, sticky="w", pady=(10, 0))
+        # These two have no Apply of their own, so a typed value has to commit on Enter or on
+        # leaving the box -- the spinbox `command` only fires for the little arrows.
+        for label, variable, limit, step in (
+            ("Show for (s)", self._alert_seconds, 60, 1),
+            ("Wait between alerts (s)", self._alert_cooldown, 3600, 5),
+        ):
+            ttk.Label(holder, text=label).grid(row=row, column=0, sticky="w", pady=(10, 0))
+            spin = ttk.Spinbox(
+                holder, from_=0 if step == 5 else 1, to=limit, increment=step,
+                textvariable=variable, width=8, command=self._on_alert_timing_changed,
+            )
+            spin.bind("<Return>", lambda _event: self._on_alert_timing_changed())
+            spin.bind("<FocusOut>", lambda _event: self._on_alert_timing_changed())
+            spin.grid(row=row, column=1, sticky="w", pady=(10, 0))
+            row += 1
 
         # -- the GIF
         ttk.Separator(holder, orient="horizontal").grid(
-            row=7, column=0, columnspan=4, sticky="ew", pady=16
+            row=row, column=0, columnspan=4, sticky="ew", pady=16
         )
+        row += 1
 
-        ttk.Label(holder, text="The GIF").grid(row=8, column=0, sticky="w")
+        ttk.Label(holder, text="The GIF").grid(row=row, column=0, sticky="w")
         gif_buttons = ttk.Frame(holder)
-        gif_buttons.grid(row=8, column=1, columnspan=3, sticky="w")
+        gif_buttons.grid(row=row, column=1, columnspan=3, sticky="w")
         self._choose_gif = ttk.Button(
             gif_buttons, text="Choose GIF...", command=self._on_choose_gif
         )
@@ -446,11 +503,14 @@ class App:
         ttk.Button(gif_buttons, text="Test alert now", command=self._on_test_alert).pack(
             side="left", padx=(6, 0)
         )
+        row += 1
 
         self._gif_progress = ttk.Progressbar(holder, orient="horizontal", length=260, maximum=100)
-        self._gif_progress.grid(row=9, column=1, columnspan=3, sticky="w", pady=(8, 0))
+        self._gif_progress.grid(row=row, column=1, columnspan=3, sticky="w", pady=(8, 0))
+        row += 1
         self._gif_status = ttk.Label(holder, text="", foreground="#666")
-        self._gif_status.grid(row=10, column=1, columnspan=3, sticky="w", pady=(4, 0))
+        self._gif_status.grid(row=row, column=1, columnspan=3, sticky="w", pady=(4, 0))
+        row += 1
 
         ttk.Label(
             holder,
@@ -463,7 +523,7 @@ class App:
             ),
             foreground="#666",
             justify="left",
-        ).grid(row=11, column=0, columnspan=4, sticky="w", pady=(16, 0))
+        ).grid(row=row, column=0, columnspan=4, sticky="w", pady=(16, 0))
 
     # -- Alerts tab handlers ---------------------------------------------------------------
 
@@ -472,12 +532,37 @@ class App:
         if not self._building:
             self.config.save()
 
+    def _on_alert_always_changed(self) -> None:
+        self.config.alert_always = bool(self._alert_always.get())
+        if not self._building:
+            self.config.save()
+        # The hours below stop meaning anything while this is on, and the note says so.
+        self._refresh_hours_note()
+
     def _on_hours_changed(self) -> None:
+        """Read the four entries, store what they were understood to mean, and say it back."""
         if self._building:
             return
         self.config.work_start = self._work_start.get().strip()
         self.config.work_end = self._work_end.get().strip()
+        # A blank half of the afternoon is a missing afternoon, not an empty string to parse.
+        self.config.afternoon_start = self._afternoon_start.get().strip() or None
+        self.config.afternoon_end = self._afternoon_end.get().strip() or None
+
+        # Store the canonical form rather than whatever was typed, so a hand-typed "13:00" is
+        # saved and shown as "1:00 PM" and config.json agrees with the window.
+        schedule = work_hours.Schedule.from_config(self.config)
+        afternoon = schedule.afternoon
+        self.config.work_start = work_hours.format_clock(schedule.morning.start)
+        self.config.work_end = work_hours.format_clock(schedule.morning.end)
+        self.config.afternoon_start = (
+            work_hours.format_clock(afternoon.start) if afternoon is not None else None
+        )
+        self.config.afternoon_end = (
+            work_hours.format_clock(afternoon.end) if afternoon is not None else None
+        )
         self.config.save()
+        self._show_hours()
         self._refresh_hours_note()
 
     def _on_days_changed(self) -> None:
@@ -497,19 +582,56 @@ class App:
             return
         self.config.save()
 
-    def _refresh_hours_note(self) -> None:
-        """Say back what the window was understood to mean, wrap and all.
+    def _show_hours(self) -> None:
+        """Put the stored hours in the entries. Blank afternoon entries stay blank."""
+        schedule = work_hours.Schedule.from_config(self.config)
+        self._work_start.set(work_hours.format_clock(schedule.morning.start))
+        self._work_end.set(work_hours.format_clock(schedule.morning.end))
+        afternoon = schedule.afternoon
+        self._afternoon_start.set(
+            work_hours.format_clock(afternoon.start) if afternoon is not None else ""
+        )
+        self._afternoon_end.set(
+            work_hours.format_clock(afternoon.end) if afternoon is not None else ""
+        )
 
-        The overnight case is the one worth confirming out loud: 22:00 to 06:00 is a window that
-        belongs to the day it opens on, and nobody should have to guess that from two entry boxes.
+    def _refresh_hours_note(self) -> None:
+        """Say back what the day was understood to mean, gap and wrap and all.
+
+        Two cases are worth confirming out loud. The gap between the blocks is the whole point of
+        having two of them -- a message at lunch gets the GIF -- and an overnight window belongs
+        to the day it opens on, which nobody should have to guess from a pair of entry boxes.
         """
-        window = work_hours.Window.from_config(self.config)
-        if not window.days:
-            note = "no working days selected: every notification counts as out of hours"
-        else:
-            note = f"{window.start:%H:%M} to {window.end:%H:%M}"
+        if self.config.alert_always:
+            self._hours_note.configure(
+                text="every notification alerts, so none of the above is being read"
+            )
+            return
+
+        schedule = work_hours.Schedule.from_config(self.config)
+        if not schedule.days:
+            self._hours_note.configure(
+                text="no working days selected: every notification counts as out of hours"
+            )
+            return
+
+        blocks = []
+        for window in schedule.windows:
+            block = (
+                f"{work_hours.format_clock(window.start)} "
+                f"to {work_hours.format_clock(window.end)}"
+            )
             if window.wraps:
-                note += " (overnight, counted from the day it starts)"
+                block += " (overnight, counted from the day it starts)"
+            blocks.append(block)
+        note = ", ".join(blocks)
+
+        gap = schedule.gap()
+        if gap is not None:
+            note += (
+                f"\n{work_hours.format_clock(gap[0])} "
+                f"to {work_hours.format_clock(gap[1])} counts as out of hours"
+            )
         self._hours_note.configure(text=note)
 
     def _on_choose_gif(self) -> None:
@@ -623,9 +745,19 @@ class App:
         holder = ttk.Frame(parent)
         holder.pack(anchor="nw", padx=12, pady=12, fill="x")
 
-        self._connection = ttk.Label(holder, text="")
-        self._connection.pack(anchor="w")
-        self._connection_text = ""
+        # Everything the alert depends on, in one block. These four fail independently -- a board
+        # can be attached with no GIF on it, notifications can be read with Teams not running --
+        # and chasing each one down its own tab is how a silent alert stays a mystery.
+        health = ttk.Frame(holder)
+        health.pack(anchor="w", fill="x")
+        self._health: dict[str, ttk.Label] = {}
+        self._health_text: dict[str, str] = {}
+        for row, (key, label) in enumerate(HEALTH_ROWS):
+            ttk.Label(health, text=label).grid(row=row, column=0, sticky="w", padx=(0, 12))
+            value = ttk.Label(health, text="")
+            value.grid(row=row, column=1, sticky="w")
+            self._health[key] = value
+            self._health_text[key] = ""
 
         self._startup = tk.BooleanVar()
         ttk.Checkbutton(
@@ -669,8 +801,8 @@ class App:
             self._clock.set(self.config.send_clock)
             self._startup.set(self.config.start_with_windows)
             self._alert_enabled.set(self.config.alert_enabled)
-            self._work_start.set(self.config.work_start)
-            self._work_end.set(self.config.work_end)
+            self._alert_always.set(self.config.alert_always)
+            self._show_hours()
             working = work_hours.normalise_days(self.config.work_days)
             for index, var in enumerate(self._work_days):
                 var.set(index in working)
@@ -731,19 +863,46 @@ class App:
         )
         return lines[0] if lines else status_label(self._selected_status(), self.config.language)
 
-    def _refresh_connection(self) -> None:
-        """Repaint the Device tab's status line. Cheap, and called from the pump -- so pressing
-        Reconnect visibly does something even when the answer is that it still cannot connect."""
+    def _board_health(self) -> tuple[str, str]:
         port = self.worker.link.port
         if port:
-            text = f"Connected on {port}"
-        elif self.worker.link.last_error:
-            text = f"No board: {self.worker.link.last_error}"
-        else:
-            text = "Looking for the board - it is probed every few seconds"
-        if text != self._connection_text:
-            self._connection_text = text
-            self._connection.configure(text=text)
+            return f"Connected on {port}", OK
+        if self.worker.link.last_error:
+            return f"No board: {self.worker.link.last_error}", BAD
+        return "Looking for the board - it is probed every few seconds", UNKNOWN
+
+    def _log_health(self) -> tuple[str, str]:
+        current = self.worker.watcher.current_log
+        if current is not None:
+            return f"Reading {current.name}", OK
+        return f"No Teams logs in {self.worker.watcher.log_dir}", BAD
+
+    def _gif_health(self) -> tuple[str, str]:
+        # There is no command to ask the board what it holds, so this only ever repeats what it
+        # has already said: an alert that played, one it refused for want of a file, or nothing.
+        state = self.worker._board_has_gif
+        if state is True:
+            return "On the board", OK
+        if state is False:
+            return "None on the board - choose one on the Alerts tab", BAD
+        return "Unknown until an alert is played - try Test alert now", UNKNOWN
+
+    def _refresh_connection(self) -> None:
+        """Repaint the Device tab's health block.
+
+        Cheap, and called from the pump -- so pressing Reconnect or Re-check visibly does
+        something even when the answer is that it still does not work. Each row is only
+        reconfigured when its text actually changes, because this runs ten times a second.
+        """
+        answers = {
+            "board": self._board_health(),
+            "log": self._log_health(),
+            "gif": self._gif_health(),
+        }
+        for key, (text, colour) in answers.items():
+            if text != self._health_text[key]:
+                self._health_text[key] = text
+                self._health[key].configure(text=text, foreground=colour)
 
     # -- Messages tab handlers -----------------------------------------------------------
 

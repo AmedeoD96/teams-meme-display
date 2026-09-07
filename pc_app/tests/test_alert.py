@@ -16,8 +16,10 @@ from pc_app.config import Config
 from pc_app.main import Worker
 from pc_app.phrases import PhraseBank
 
-# 2026-09-07 is a Monday. Inside the default 09:00-18:00 Mon-Fri window, and outside it.
+# 2026-09-07 is a Monday. Inside the default Mon-Fri day -- 9:00 AM to 1:00 PM and 2:00 PM to
+# 6:00 PM -- and outside it, including the lunch gap between the two blocks.
 DURING_HOURS = datetime(2026, 9, 7, 10, 30)
+LUNCH = datetime(2026, 9, 7, 13, 30)
 AFTER_HOURS = datetime(2026, 9, 7, 22, 30)
 WEEKEND = datetime(2026, 9, 12, 10, 30)
 
@@ -69,6 +71,13 @@ def test_a_notification_during_hours_plays_nothing(worker, monkeypatch):
     assert alerts(worker) == []
 
 
+def test_lunch_counts_as_out_of_hours(worker, monkeypatch):
+    """The gap between the morning and afternoon blocks earns the GIF like any evening does."""
+    at(worker, monkeypatch, LUNCH)
+    notify(worker)
+    assert len(alerts(worker)) == 1
+
+
 def test_the_weekend_counts_as_out_of_hours(worker, monkeypatch):
     at(worker, monkeypatch, WEEKEND)
     notify(worker)
@@ -87,6 +96,84 @@ def test_the_master_switch_suppresses_it(worker, monkeypatch):
     at(worker, monkeypatch, AFTER_HOURS)
     notify(worker)
     assert alerts(worker) == []
+
+
+# -- alert_always, which takes the clock out of the decision ----------------------------------
+
+
+@pytest.mark.parametrize("moment", [DURING_HOURS, LUNCH, AFTER_HOURS, WEEKEND])
+def test_alert_always_fires_whatever_the_clock_says(worker, monkeypatch, moment):
+    worker.config.alert_always = True
+    at(worker, monkeypatch, moment)
+    notify(worker)
+    assert len(alerts(worker)) == 1
+
+
+def test_alert_always_is_off_by_default(worker, monkeypatch):
+    assert worker.config.alert_always is False
+    at(worker, monkeypatch, DURING_HOURS)
+    notify(worker)
+    assert alerts(worker) == []
+
+
+def test_alert_always_still_respects_the_cooldown(worker, monkeypatch):
+    """Ignoring the hours is not the same as ignoring the gap between alerts."""
+    worker.config.alert_always = True
+    at(worker, monkeypatch, DURING_HOURS)
+    for _ in range(4):
+        notify(worker)
+    assert len(alerts(worker)) == 1
+
+    worker._last_alert_at -= worker.config.alert_cooldown_seconds + 1
+    notify(worker)
+    assert len(alerts(worker)) == 2
+
+
+def test_the_master_switch_still_wins_over_alert_always(worker, monkeypatch):
+    worker.config.alert_enabled = False
+    worker.config.alert_always = True
+    at(worker, monkeypatch, DURING_HOURS)
+    notify(worker)
+    assert alerts(worker) == []
+
+
+def test_alert_always_needs_a_notification(worker, monkeypatch):
+    # It widens *when* an arrival counts, it does not invent arrivals.
+    worker.config.alert_always = True
+    at(worker, monkeypatch, DURING_HOURS)
+    worker.tick()
+    worker.tick()
+    assert alerts(worker) == []
+
+
+# -- what the Device tab reads ----------------------------------------------------------------
+
+
+def test_the_board_gif_state_starts_unknown(worker):
+    # There is no command to ask the board what it holds, so nothing is claimed until it says.
+    assert worker._board_has_gif is None
+
+
+def test_an_alert_that_plays_means_the_board_has_a_gif(worker):
+    worker._on_alert_event("ALERT:6000")
+    assert worker._board_has_gif is True
+
+
+def test_a_refused_alert_says_whether_the_gif_is_missing(worker):
+    worker._on_alert_event("ALERTERR:nogif")
+    assert worker._board_has_gif is False
+    # "uploading" says nothing about whether a file is there, so it must not overwrite the answer.
+    worker._on_alert_event("ALERTERR:uploading")
+    assert worker._board_has_gif is False
+
+
+def test_a_fresh_link_forgets_what_the_last_board_held(worker, monkeypatch):
+    worker._on_alert_event("ALERT:6000")
+    assert worker._board_has_gif is True
+    at(worker, monkeypatch, DURING_HOURS)
+    worker._was_connected = False  # as if the cable had just been plugged into another board
+    worker.tick()
+    assert worker._board_has_gif is None
 
 
 # -- the cooldown ---------------------------------------------------------------------------

@@ -67,15 +67,24 @@ class Config:
 
     #: Master switch. With this off the notification count is still parsed but nothing is sent.
     alert_enabled: bool = True
-    #: The working window, "HH:MM". An end below the start wraps past midnight (22:00-06:00).
-    work_start: str = "09:00"
-    work_end: str = "18:00"
-    #: Weekdays that count as working, Monday=0, matching datetime.weekday().
+    #: Alert on every notification, whatever the clock says. The working day below is then only
+    #: bookkeeping -- nothing reads it while this is on.
+    alert_always: bool = False
+    #: The morning block. "9:00 AM" is the form the settings window writes, but the older
+    #: 24-hour "09:00" still loads. An end below the start wraps past midnight (10:00 PM-6:00 AM).
+    work_start: str = "9:00 AM"
+    work_end: str = "1:00 PM"
+    #: The afternoon block, so the break between the two -- lunch -- counts as out of hours.
+    #: Leave either blank for a single continuous day running work_start to work_end.
+    afternoon_start: str | None = "2:00 PM"
+    afternoon_end: str | None = "6:00 PM"
+    #: Weekdays that count as working, Monday=0, matching datetime.weekday(). Shared by both
+    #: blocks: nobody works Monday mornings and Tuesday afternoons.
     work_days: list[int] = field(default_factory=lambda: [0, 1, 2, 3, 4])
     #: How long the GIF plays before the board goes back to the status display.
     alert_seconds: float = 6.0
     #: Minimum gap between two alerts, so a burst of messages does not loop the GIF.
-    alert_cooldown_seconds: float = 60.0
+    alert_cooldown_seconds: float = 15.0
 
     start_with_windows: bool = False
 
