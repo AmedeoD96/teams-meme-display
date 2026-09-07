@@ -127,8 +127,16 @@ class App:
         self._icon = None
         self._tray_thread: threading.Thread | None = None
         self._building = False
+        #: Bumped per press of the test button, so a late answer to an earlier press cannot
+        #: overwrite what the current one is saying.
+        self._alert_request = 0
 
         self._build()
+
+        # Fires on the worker thread, so it is bounced through the pump like the upload callbacks.
+        self.worker.on_alert_result = lambda ok, detail: self.post(
+            lambda: self._on_alert_result(ok, detail)
+        )
 
     # -- cross-thread plumbing -----------------------------------------------------------
 
@@ -435,7 +443,7 @@ class App:
             gif_buttons, text="Choose GIF...", command=self._on_choose_gif
         )
         self._choose_gif.pack(side="left")
-        ttk.Button(gif_buttons, text="Test alert now", command=self.worker.alert_now).pack(
+        ttk.Button(gif_buttons, text="Test alert now", command=self._on_test_alert).pack(
             side="left", padx=(6, 0)
         )
 
@@ -450,8 +458,8 @@ class App:
                 "Your GIF is resized to 240x240, put on a single palette and trimmed to fit,\n"
                 "then sent over USB. The board composites nothing -- it draws a scanline at a\n"
                 "time and has no canvas -- so the file is re-encoded rather than passed through.\n"
-                "Expect around 15 seconds. The bundled GIF stays flashed as the fallback for\n"
-                "when no PC is attached."
+                f"Expect up to about {estimate_seconds(GIF_MAX_BYTES):.0f} seconds. The\n"
+                "bundled GIF stays flashed as the fallback for when no PC is attached."
             ),
             foreground="#666",
             justify="left",
@@ -544,6 +552,44 @@ class App:
                 lambda: self._on_gif_done(source, stats, error)
             ),
         )
+
+    def _on_test_alert(self) -> None:
+        """Play the GIF now, and say what the board made of it.
+
+        The command itself cannot fail here -- it is queued for the worker thread -- so the only
+        honest report comes from the board's own answer, or from its absence.
+        """
+        self._alert_request += 1
+        request = self._alert_request
+        self._gif_status.configure(text="Asking the board...", foreground="#666")
+        self.worker.alert_now()
+        # Firmware without EVT:ALERT (or no board at all) answers nothing, which would otherwise
+        # look exactly like the button doing nothing.
+        self.root.after(5000, lambda: self._on_alert_timeout(request))
+
+    def _on_alert_timeout(self, request: int) -> None:
+        if request != self._alert_request:
+            return  # answered, or superseded by a later press
+        self._gif_status.configure(
+            text="No reply from the board -- is it connected and running the current firmware "
+                 "(pio run -t upload)?",
+            foreground="#a00",
+        )
+
+    def _on_alert_result(self, ok: bool, detail: str) -> None:
+        # Retires whatever timeout is outstanding: the next press starts a new request anyway.
+        self._alert_request += 1
+        if ok:
+            self._gif_status.configure(text="Playing on the board", foreground="#060")
+            return
+        if detail.startswith("nogif"):
+            text = ("The board has no GIF yet -- choose one above, or flash the bundled one "
+                    "(pio run -t uploadfs)")
+        elif detail.startswith("uploading"):
+            text = "An upload is in progress; try again when it finishes"
+        else:
+            text = f"The board could not play the GIF: {detail}"
+        self._gif_status.configure(text=text, foreground="#a00")
 
     def _on_gif_progress(self, sent: int, total: int) -> None:
         self._gif_progress.configure(value=100 * sent / max(1, total))

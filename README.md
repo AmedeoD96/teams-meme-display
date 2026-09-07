@@ -225,14 +225,17 @@ phrases work. Expect roughly fifteen seconds, with a progress bar.
 It is always re-encoded rather than passed through, and that is not just about size: the board
 draws a scanline at a time and keeps no canvas, so a GIF with per-frame colour palettes would
 render as garbage. Yours is resized to fit 240×240, put on a single palette shared by every
-frame, and trimmed — frames first, then colours — until it fits. It is centred on the screen, so
-one file works in both orientations.
+frame, and trimmed — frames first, then colours — until it fits. If that still leaves fewer than
+twelve frames the canvas shrinks too, because a smaller picture is a better trade than a loop
+reduced to a stutter. It is centred on the screen, so one file works in both orientations.
 
 Nothing is committed on the board until the length and checksum both verify, so a cable pulled
 mid-upload costs you the new GIF and not the old one.
 
-The bundled GIF (drawn by `tools/make_alert_gif.py`, flashed by `build_memes.py`) stays on the
-board as the fallback for when no PC is attached.
+The bundled GIF (`assets/alert.gif`, flashed by `build_memes.py`) stays on the board as the
+fallback for when no PC is attached. Drop your own file there to change it — but note that
+`tools/make_alert_gif.py` *overwrites* `assets/alert.gif` with the drawn placeholder, so only run
+it if that is what you want back.
 
 ## Standalone .exe
 

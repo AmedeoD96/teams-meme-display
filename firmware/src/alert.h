@@ -28,7 +28,9 @@ constexpr uint32_t kMaxGifBytes = 300u * 1024u;
 void begin(TFT_eSPI *panel);
 
 // Start playing kGifPath for *durationMs*. Returns false and changes nothing on screen if there
-// is no GIF to play or it cannot be decoded.
+// is no GIF to play or it cannot be decoded. Either way the outcome goes out on the wire --
+// EVT:ALERT:<ms> or EVT:ALERTERR:<reason> -- because the PC's test button has nothing else to go
+// on. See docs/PROTOCOL.md.
 bool play(uint32_t durationMs);
 
 // True while the GIF owns the panel. Nothing else may draw until this goes false.

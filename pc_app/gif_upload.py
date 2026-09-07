@@ -45,6 +45,15 @@ MAX_BYTES = 300 * 1024
 #: palette is a visible cost and most GIFs fit at full colour once they have been resized.
 PALETTE_STEPS = (256, 128, 64, 32)
 
+#: Below this, a loop stops reading as an animation and starts reading as a stutter. A source
+#: with more frames than this is worth shrinking on the canvas to keep them.
+MIN_FRAMES = 12
+
+#: Canvas ladder, as fractions of max_size, each step tried only when the one before it could not
+#: hold MIN_FRAMES. Coarse on purpose: resampling adds noise that costs LZW roughly what the
+#: dropped pixels saved, so the sizes in between are not reliably smaller than the one above.
+SIZE_STEPS = (1.0, 0.66, 0.5)
+
 #: Raw bytes per chunk. 96 bytes -> 128 base64 characters; with the "GIFDATA:" prefix that is
 #: 136, comfortably inside the firmware's 160-character line limit (kMaxLine in serial_link.cpp).
 CHUNK_BYTES = 96
@@ -80,7 +89,12 @@ def _read_frames(source: Path) -> tuple[list, list[int]]:
     with Image.open(source) as raw:
         for frame in ImageSequence.Iterator(raw):
             durations.append(int(frame.info.get("duration") or DEFAULT_FRAME_MS))
-            frames.append(frame.convert("RGB"))
+            rgb = frame.convert("RGB")
+            # Converting P->RGB turns a transparency *index* into an RGB tuple, and the tuple
+            # rides along in info until save() tries to write it as a one-byte palette index.
+            # Every frame here is opaque and full anyway, so the key has nothing left to say.
+            rgb.info.pop("transparency", None)
+            frames.append(rgb)
     if not frames:
         raise ValueError("no frames in the image")
     return frames, durations
@@ -164,6 +178,47 @@ def _save(frames: list, durations: list[int], destination: Path, palette: bytes)
     return destination.stat().st_size
 
 
+def _scaled(size: tuple[int, int], fraction: float) -> tuple[int, int]:
+    return max(1, round(size[0] * fraction)), max(1, round(size[1] * fraction))
+
+
+def _largest_fit(frames: list, durations: list[int], colours: int, destination: Path,
+                 max_bytes: int) -> tuple[list, list[int]] | None:
+    """The most of *frames* that encode under *max_bytes*, or None if not even one does.
+
+    A binary search rather than a couple of guesses: dropping straight from every frame to half
+    and then to two throws away most of an animation that would have fitted at two thirds, and an
+    encode costs milliseconds next to the upload it decides.
+
+    Leaves *destination* holding whichever attempt was encoded last, which is not necessarily the
+    one returned -- the caller re-encodes the winner.
+    """
+    low, high = 1, len(frames)
+    best: tuple[list, list[int]] | None = None
+    while low <= high:
+        middle = (low + high) // 2
+        attempt, attempt_durations = _thin(frames, durations, middle)
+        mapped, palette = _quantise(attempt, colours)
+        if _save(mapped, attempt_durations, destination, palette) <= max_bytes:
+            best = (attempt, attempt_durations)
+            low = middle + 1
+        else:
+            high = middle - 1
+    return best
+
+
+def _fits_at_all(frames: list, durations: list[int], max_size: tuple[int, int],
+                 destination: Path, max_bytes: int) -> bool:
+    """One frame, smallest canvas, fewest colours -- the floor under every search below.
+
+    Ruling the impossible case out here costs one encode and saves the ladder from working its
+    way through a dozen of them to reach the same answer.
+    """
+    smallest = [_fit(frames[0], _scaled(max_size, SIZE_STEPS[-1]))]
+    mapped, palette = _quantise(smallest, PALETTE_STEPS[-1])
+    return _save(mapped, durations[:1], destination, palette) <= max_bytes
+
+
 def prepare_gif(
     source: Path | str,
     destination: Path | str,
@@ -174,7 +229,9 @@ def prepare_gif(
     """Re-encode *source* into something the board can actually play.
 
     Shed frames first and colours only after that: a shorter loop still reads as the same
-    animation, while a banded palette reads as a broken picture.
+    animation, while a banded palette reads as a broken picture. Only once neither has got the
+    file under the cap with MIN_FRAMES left does the canvas start shrinking -- a smaller picture
+    is a smaller picture, but a two-frame loop is not the animation the user chose.
     """
     if Image is None:  # pragma: no cover
         raise RuntimeError("Pillow is required to prepare a GIF: pip install pillow")
@@ -183,35 +240,53 @@ def prepare_gif(
     destination = Path(destination)
 
     original, durations = _read_frames(source)
-    frames = [_fit(frame, max_size) for frame in original]
-    frames, durations = _thin(frames, durations, max_frames)
-    dropped = len(original) - len(frames)
+    capped, durations = _thin(original, durations, max_frames)
+    dropped = len(original) - len(capped)
 
-    for colours in PALETTE_STEPS:
-        for limit in (len(frames), max(2, len(frames) // 2), 2):
-            attempt, attempt_durations = _thin(frames, durations, limit)
-            mapped, palette = _quantise(attempt, colours)
-            size = _save(mapped, attempt_durations, destination, palette)
-            if size <= max_bytes:
-                stats = GifStats(
-                    width=attempt[0].width,
-                    height=attempt[0].height,
-                    frames=len(attempt),
-                    colours=colours,
-                    size_bytes=size,
-                    dropped_frames=dropped + (len(frames) - len(attempt)),
-                )
-                log.info(
-                    "prepared %s: %dx%d, %d frames, %d colours, %d bytes",
-                    source.name, stats.width, stats.height, stats.frames, colours, size,
-                )
-                return stats
+    if not _fits_at_all(capped, durations, max_size, destination, max_bytes):
+        destination.unlink(missing_ok=True)
+        raise GifTooBig(
+            f"{source.name} will not fit in {max_bytes:,} bytes even as a single "
+            f"{PALETTE_STEPS[-1]}-colour frame"
+        )
 
-    destination.unlink(missing_ok=True)
-    raise GifTooBig(
-        f"{source.name} will not fit in {max_bytes:,} bytes even at "
-        f"{PALETTE_STEPS[-1]} colours and 2 frames"
+    # A source that is already short is never shrunk to protect frames it does not have.
+    floor = min(MIN_FRAMES, len(capped))
+    best: tuple[list, list[int], int] | None = None
+    for fraction in SIZE_STEPS:
+        frames = [_fit(frame, _scaled(max_size, fraction)) for frame in capped]
+        for colours in PALETTE_STEPS:
+            fitted = _largest_fit(frames, durations, colours, destination, max_bytes)
+            if fitted is None:
+                continue
+            if best is None or len(fitted[0]) > len(best[0]):
+                best = (fitted[0], fitted[1], colours)
+            # More colours beat fewer, so the first palette that fits is the one to keep -- but
+            # only if it kept the animation. Otherwise it is worth asking the smaller ones.
+            if len(fitted[0]) >= floor:
+                break
+        if best is not None and len(best[0]) >= floor:
+            break
+
+    if best is None:  # pragma: no cover - _fits_at_all above already proved one frame fits
+        destination.unlink(missing_ok=True)
+        raise GifTooBig(f"{source.name} will not fit in {max_bytes:,} bytes")
+    frames, frame_durations, colours = best
+    mapped, palette = _quantise(frames, colours)
+    size = _save(mapped, frame_durations, destination, palette)
+    stats = GifStats(
+        width=frames[0].width,
+        height=frames[0].height,
+        frames=len(frames),
+        colours=colours,
+        size_bytes=size,
+        dropped_frames=dropped + (len(capped) - len(frames)),
     )
+    log.info(
+        "prepared %s: %dx%d, %d frames, %d colours, %d bytes",
+        source.name, stats.width, stats.height, stats.frames, colours, size,
+    )
+    return stats
 
 
 # -- the wire ------------------------------------------------------------------------------

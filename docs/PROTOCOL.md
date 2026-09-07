@@ -83,6 +83,8 @@ orientation and it falls back to the built-in drawn scene.
 | `PONG` | Reply to `PING`. Used by `serial_link.find_port()` to identify the right COM port. |
 | `LOG:<text>` | Free-form diagnostics. The PC app logs these at debug level. |
 | `EVT:NEXT` | The screen was tapped. The board picks a new meme itself and this asks the PC for a fresh phrase. |
+| `EVT:ALERT:<ms>` | The alert GIF is playing, for this long. |
+| `EVT:ALERTERR:<reason>` | The alert could not play: `nogif` (nothing flashed or uploaded yet), `uploading` (a transfer owns the file), `decode <n>` (the file is there but will not open). |
 | `EVT:GIFACK:<bytes>` | Upload flow control: that many bytes are safely written, send the next window. |
 | `EVT:GIFOK:<bytes>` | The upload verified and is now the alert GIF. |
 | `EVT:GIFERR:<reason>` | The upload was refused or failed. The previous GIF is untouched. |
@@ -92,6 +94,11 @@ orientation and it falls back to the built-in drawn scene.
 `ALERT:<ms>` plays `/alert.gif` over whatever is on screen and then puts the status display back.
 The board does not decide when: the PC does, because the PC is the side that can see your Teams
 notifications and knows the working hours you configured. See `pc_app/work_hours.py`.
+
+Every `ALERT:` is answered, with `EVT:ALERT:<ms>` if the GIF is now playing and
+`EVT:ALERTERR:<reason>` if it is not. Nothing depends on the reply -- the alert is fire and
+forget -- but the settings window's *Test alert now* button reports it, which is the only way to
+tell a board with no GIF flashed apart from one running firmware too old to know the command.
 
 What the PC is reacting to is a *rise* in the unread notification count, which Teams writes to
 its own log:

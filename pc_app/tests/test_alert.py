@@ -153,6 +153,24 @@ def test_alert_now_ignores_the_clock(worker, monkeypatch):
     assert len(alerts(worker)) == 1
 
 
+def test_the_board_answer_reaches_the_settings_window(worker, monkeypatch):
+    """The button's only honest feedback is what the board says back, so it has to arrive."""
+    seen: list[tuple[bool, str]] = []
+    worker.on_alert_result = lambda ok, detail: seen.append((ok, detail))
+    replies = [["EVT:ALERT:6000"], ["EVT:ALERTERR:nogif"]]
+    monkeypatch.setattr(worker.link, "read_lines", lambda: replies.pop(0) if replies else [])
+
+    worker.tick()
+    worker.tick()
+    assert seen == [(True, "6000"), (False, "nogif")]
+
+
+def test_an_unanswered_alert_costs_nothing(worker, monkeypatch):
+    """No callback is the normal case -- the tray has none -- and must not break a tick."""
+    monkeypatch.setattr(worker.link, "read_lines", lambda: ["EVT:ALERTERR:nogif"])
+    worker.tick()
+
+
 def test_the_duration_is_clamped_to_what_the_firmware_accepts(worker):
     worker.config.alert_seconds = 9999
     assert worker._alert_ms() == 60000

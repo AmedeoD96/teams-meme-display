@@ -68,6 +68,10 @@ class Worker:
         self._lock = threading.Lock()
         #: Called with the published Status whenever it changes, so the tray icon can follow.
         self.on_status_change = lambda status: None
+        #: Called with (ok, detail) when the board answers an ALERT:, so the settings window can
+        #: say whether the test button did anything. Runs on this thread, like upload_gif's
+        #: on_done, so a GUI caller has to marshal it back to its own.
+        self.on_alert_result = None
 
     # -- lifecycle -----------------------------------------------------------------------
 
@@ -147,6 +151,17 @@ class Worker:
         """
         self._last_alert_at = time.monotonic()
         self.queue_command(f"ALERT:{self._alert_ms()}")
+
+    def _on_alert_event(self, event: str) -> None:
+        """The board's answer to an ALERT:. Nothing here retries -- an alert is fire and forget --
+        but a failure is worth a log line and worth showing next to the button that caused it.
+        """
+        ok = not event.startswith("ALERTERR")
+        detail = event.partition(":")[2]
+        if not ok:
+            log.warning("the board could not play the alert: %s", detail or "no reason given")
+        if self.on_alert_result is not None:
+            self.on_alert_result(ok, detail)
 
     def _alert_ms(self) -> int:
         # Clamped to the same range the firmware clamps to, so what the GUI shows is what happens.
@@ -273,6 +288,8 @@ class Worker:
                 # A tap on the panel. The board picks its own meme; the words come from here.
                 if event == "NEXT":
                     self.refresh_caption()
+                elif event.startswith("ALERT"):
+                    self._on_alert_event(event)
                 log.debug("board event: %s", event)
             elif line != "PONG":
                 log.debug("board: %s", line)

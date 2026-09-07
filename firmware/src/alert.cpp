@@ -235,10 +235,15 @@ bool uploading() { return gUploading; }
 
 bool play(uint32_t durationMs) {
   if (gPanel == nullptr || durationMs == 0) return false;
-  if (gUploading) return false;  // the file is being rewritten underneath us
+  if (gUploading) {
+    // The file is being rewritten underneath us.
+    Serial.println(F("EVT:ALERTERR:uploading"));
+    return false;
+  }
   if (gActive) stop();  // a second ALERT restarts cleanly rather than stacking
 
   if (!LittleFS.exists(kGifPath)) {
+    Serial.println(F("EVT:ALERTERR:nogif"));
     Serial.println(F("LOG:no /alert.gif -- flash the pack or upload one from the settings window"));
     return false;
   }
@@ -247,6 +252,7 @@ bool play(uint32_t durationMs) {
   // the JPEG path arrives in (see TJpgDec.setSwapBytes in display.cpp).
   gGif.begin(GIF_PALETTE_RGB565_BE);
   if (!gGif.open(kGifPath, openFile, closeFile, readFile, seekFile, drawLine)) {
+    Serial.printf("EVT:ALERTERR:decode %d\n", gGif.getLastError());
     Serial.printf("LOG:could not open %s (gif error %d)\n", kGifPath, gGif.getLastError());
     return false;
   }
@@ -263,6 +269,9 @@ bool play(uint32_t durationMs) {
   gDeadlineMs = now + durationMs;
   gNextFrameMs = now;
   gActive = true;
+  // Answered on the wire and not only in the log: the settings window's test button has no
+  // other way to tell a playing alert apart from a board that never understood the command.
+  Serial.printf("EVT:ALERT:%lu\n", static_cast<unsigned long>(durationMs));
   Serial.printf("LOG:alert %dx%d for %lums\n", width, height, static_cast<unsigned long>(durationMs));
   return true;
 }

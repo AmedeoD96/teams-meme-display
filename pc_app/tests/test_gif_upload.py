@@ -18,6 +18,7 @@ from pc_app import gif_upload
 from pc_app.gif_upload import (
     CHUNK_BYTES,
     MAX_SIZE,
+    MIN_FRAMES,
     GifTooBig,
     UploadFailed,
     chunk_count,
@@ -38,8 +39,14 @@ FIRMWARE_MAX_LINE = 160
 # -- fixtures ------------------------------------------------------------------------------
 
 
-def make_gif(path: Path, frames: int = 8, size=(400, 300), late_colour=False) -> Path:
-    """A multi-frame test GIF. With *late_colour*, a colour that only appears after frame 0."""
+def make_gif(
+    path: Path, frames: int = 8, size=(400, 300), late_colour=False, transparent=False
+) -> Path:
+    """A multi-frame test GIF.
+
+    With *late_colour*, a colour that only appears after frame 0. With *transparent*, the source
+    declares a transparent palette index, which is what most GIFs off the internet do.
+    """
     images = []
     for index in range(frames):
         frame = Image.new("RGB", size, (20, 30, 40))
@@ -53,8 +60,9 @@ def make_gif(path: Path, frames: int = 8, size=(400, 300), late_colour=False) ->
             # Pure magenta, nowhere in the first frame.
             draw.rectangle((10, 10, 60, 60), fill=(255, 0, 255))
         images.append(frame)
+    extra = {"transparency": 0} if transparent else {}
     images[0].save(
-        path, format="GIF", save_all=True, append_images=images[1:], duration=80, loop=0
+        path, format="GIF", save_all=True, append_images=images[1:], duration=80, loop=0, **extra
     )
     return path
 
@@ -131,6 +139,43 @@ def read_gif_blocks(path: Path) -> tuple[bool, list[tuple[bool, int]]]:
         else:
             break
     return has_global, frames
+
+
+def test_a_transparent_source_prepares(tmp_path):
+    """Regression: Pillow rewrites a transparency *index* into an RGB tuple on the way to RGB.
+
+    Left in the frame's info, that tuple reaches save() as a one-byte palette index and raises
+    "unsupported operand type(s) for &: 'tuple' and 'int'" -- which is most GIFs off the internet.
+    """
+    source = make_gif(tmp_path / "clear.gif", transparent=True)
+    with Image.open(source) as raw:
+        assert "transparency" in raw.info, "the fixture no longer declares transparency"
+
+    stats = prepare_gif(source, tmp_path / "out.gif")
+    assert stats.frames == 8
+
+
+def test_the_fit_search_keeps_what_fits(tmp_path):
+    """A budget that only just bites should cost a few frames, not most of them."""
+    source = make_gif(tmp_path / "long.gif", frames=40, size=(240, 240))
+    full = prepare_gif(source, tmp_path / "out.gif")
+    assert full.frames == 40
+
+    stats = prepare_gif(source, tmp_path / "out.gif", max_bytes=int(full.size_bytes * 0.8))
+    assert stats.size_bytes <= full.size_bytes * 0.8
+    # Halving is what a blind search settles for; this one has to do better than that.
+    assert stats.frames > 20
+
+
+def test_the_canvas_shrinks_only_to_save_the_animation(tmp_path):
+    """Frames first, then the canvas: a smaller picture beats a loop reduced to a stutter."""
+    source = make_gif(tmp_path / "big.gif", frames=40, size=(480, 480))
+    full = prepare_gif(source, tmp_path / "out.gif")
+    assert (full.width, full.height) == MAX_SIZE, "a comfortable budget keeps the full canvas"
+
+    stats = prepare_gif(source, tmp_path / "out.gif", max_bytes=int(full.size_bytes * 0.1))
+    assert stats.width < MAX_SIZE[0]
+    assert stats.frames >= MIN_FRAMES
 
 
 def test_prepare_writes_one_global_palette_and_no_local_ones(source, tmp_path):
