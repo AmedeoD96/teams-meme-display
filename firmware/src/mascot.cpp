@@ -2,6 +2,8 @@
 
 #include <math.h>
 
+#include "say.h"
+
 namespace mascot {
 namespace {
 
@@ -245,8 +247,8 @@ void layout(int16_t width, int16_t height, int16_t captionReserve) {
       // is much better than not booting.
       delete gSprite;
       gSprite = nullptr;
-      Serial.printf("LOG:no heap for a %dx%d mascot sprite, drawing direct\n", spriteSide,
-                    spriteSide);
+      say::printf("LOG:no heap for a %dx%d mascot sprite, drawing direct\n", spriteSide,
+                   spriteSide);
     }
   }
   reset();

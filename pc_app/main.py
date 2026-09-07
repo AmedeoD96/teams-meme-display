@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import logging
 import sys
 import tempfile
@@ -25,13 +26,14 @@ from pc_app.i18n import DISPLAY_MODES, ORIENTATIONS, TONES, normalise, normalise
 from pc_app.phrases import MAX_PHRASE_CHARS, PhraseBank
 from pc_app.presence import Status, teams_is_running
 from pc_app.presence import PresenceEngine
-from pc_app.serial_link import HAVE_PYSERIAL, SerialLink
+from pc_app.serial_link import HAVE_PYSERIAL
 from pc_app.teams_log import TeamsLogWatcher
+from pc_app.transport import adopt, make_link
 from pc_app.text import to_display_ascii
 
 log = logging.getLogger("teams_meme")
 
-VERSION = "1.3.0"
+VERSION = "1.4.0"
 
 
 class Worker:
@@ -41,7 +43,9 @@ class Worker:
         self.config = config
         self.watcher = TeamsLogWatcher(config.log_dir, cloud_context=config.cloud_context)
         self.engine = PresenceEngine(debounce_seconds=config.debounce_seconds)
-        self.link = SerialLink(port=config.port, baud=config.baud, dry_run=dry_run)
+        # USB or WiFi, or whichever answers -- see pc_app/transport.py. Nothing below this
+        # line knows or cares which, because both speak the same protocol.
+        self.link = make_link(config, dry_run=dry_run)
         self.dry_run = dry_run
         #: Phrasing is chosen here rather than on the board, so an edit in the GUI reaches the
         #: screen on the next rotation tick without a rebuild. See pc_app/phrases.py.
@@ -75,6 +79,10 @@ class Worker:
         #: say whether the test button did anything. Runs on this thread, like upload_gif's
         #: on_done, so a GUI caller has to marshal it back to its own.
         self.on_alert_result = None
+        #: Called with the board's own report of its radio -- 'online:<ip>:<rssi>' and the
+        #: rest of EVT:WIFI: -- so the settings window can show what provisioning did. Worker
+        #: thread, like on_alert_result.
+        self.on_wifi_event = None
 
     # -- lifecycle -----------------------------------------------------------------------
 
@@ -204,6 +212,47 @@ class Worker:
         log.info("%s -> alert for %dms", reason, self._alert_ms())
         self.queue_command(f"ALERT:{self._alert_ms()}")
 
+    def provision_wifi(self, ssid: str, password: str) -> None:
+        """Give the board the WiFi it should join, so it can be run off a powerbank.
+
+        Queued like everything else: the port belongs to the worker thread. The board takes
+        these over USB only -- see isUsbOnly in firmware/src/serial_link.cpp -- so this does
+        nothing useful while the link itself is the network one, which is the point.
+        """
+        encoded = base64.b64encode(password.encode('utf-8')).decode('ascii')
+        log.info('sending wifi credentials for %s', ssid)
+        self.queue_command(f'WIFI:{ssid}')
+        # Base64 so a password with leading or trailing spaces survives the board's trim().
+        self.queue_command(f'WIFIPASS:{encoded}')
+        self.queue_command('WIFIAPPLY')
+        # The token is what the network transport authenticates with, and a board that has
+        # never been asked has never said it.
+        self.queue_command('TOKENGET')
+
+    def _on_wifi_event(self, detail: str) -> None:
+        """The board reporting its own radio. "online:<ip>:<rssi>" is the one that matters:
+        it is how the app learns where the board will be once the cable comes out.
+        """
+        state, _, rest = detail.partition(':')
+        if state == 'online':
+            host = rest.partition(':')[0]
+            if host and host != self.config.board_host:
+                self.config.board_host = host
+                self.config.save()
+            adopt(self.link, host=host)
+        log.info('board wifi: %s', detail)
+        if self.on_wifi_event is not None:
+            self.on_wifi_event(detail)
+
+    def _on_token(self, token: str) -> None:
+        """The board's shared secret, which only ever travels over USB."""
+        if not token or token == self.config.board_token:
+            return
+        self.config.board_token = token
+        self.config.save()
+        log.info('stored the token the board answers to')
+        adopt(self.link, token=token)
+
     def reconnect(self) -> None:
         """Ask for an immediate rescan.
 
@@ -302,6 +351,10 @@ class Worker:
                     self.refresh_caption()
                 elif event.startswith("ALERT"):
                     self._on_alert_event(event)
+                elif event.startswith("WIFI:"):
+                    self._on_wifi_event(event[len("WIFI:"):])
+                elif event.startswith("TOKEN:"):
+                    self._on_token(event[len("TOKEN:"):])
                 log.debug("board event: %s", event)
             elif line != "PONG":
                 log.debug("board: %s", line)
@@ -455,8 +508,16 @@ def main(argv: list[str] | None = None) -> int:
     if log_path:
         log.info("logging to %s", log_path)
     if not HAVE_PYSERIAL and not args.dry_run:
-        log.error("pyserial is not installed -- run: pip install -r pc_app/requirements.txt")
-        return 2
+        # Only fatal when the cable is the only way in. The network transport needs nothing but
+        # the standard library, so a board already provisioned for WiFi can still be driven.
+        wireless = config.transport == "network" or (
+            config.transport == "auto" and config.board_token
+        )
+        if wireless:
+            log.warning("pyserial is not installed; only the network transport is available")
+        else:
+            log.error("pyserial is not installed -- run: pip install -r pc_app/requirements.txt")
+            return 2
 
     worker = Worker(config, dry_run=args.dry_run)
     worker.start()

@@ -4,6 +4,7 @@
 #include <TFT_eSPI.h>
 #include <TJpg_Decoder.h>
 
+#include "say.h"
 #include "mascot.h"
 
 namespace display {
@@ -451,7 +452,7 @@ void drawImageScene(Status status, Language language, const String &memePath,
     // A decode failure leaves a partly drawn screen, so fall back to the scene to avoid
     // showing garbage.
     drew = TJpgDec.drawFsJpg(0, 0, memePath.c_str(), LittleFS) == JDR_OK;
-    if (!drew) Serial.printf("LOG:jpeg decode failed for %s\n", memePath.c_str());
+    if (!drew) say::printf("LOG:jpeg decode failed for %s\n", memePath.c_str());
   }
   if (!drew) drawFallbackScene(status, language);
   // The meme (or the fallback scene) just covered the whole screen, the old band included.
@@ -479,8 +480,8 @@ void begin(Orientation orientation, DisplayMode displayMode) {
   TJpgDec.setSwapBytes(true);  // TFT_eSPI wants the opposite byte order to the decoder's output
   TJpgDec.setCallback(pushJpegBlock);
 
-  Serial.printf("LOG:panel %dx%d, mode %s\n", tft.width(), tft.height(),
-                displayModeName(gMode));
+  say::printf("LOG:panel %dx%d, mode %s\n", tft.width(), tft.height(),
+               displayModeName(gMode));
 }
 
 void setOrientation(Orientation newOrientation) {
@@ -491,7 +492,7 @@ void setOrientation(Orientation newOrientation) {
   // The panel swapped its axes, so the character needs a new box and a new sprite.
   mascot::layout(tft.width(), tft.height(), kCaptionReserve);
   invalidate();
-  Serial.printf("LOG:panel %dx%d\n", tft.width(), tft.height());
+  say::printf("LOG:panel %dx%d\n", tft.width(), tft.height());
 }
 
 Orientation orientation() { return gOrientation; }
@@ -502,7 +503,7 @@ void setMode(DisplayMode newMode) {
   if (newMode == gMode) return;
   gMode = newMode;
   invalidate();
-  Serial.printf("LOG:mode %s\n", displayModeName(gMode));
+  say::printf("LOG:mode %s\n", displayModeName(gMode));
 }
 
 DisplayMode mode() { return gMode; }

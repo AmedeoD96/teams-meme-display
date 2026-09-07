@@ -148,6 +148,9 @@ class App:
         self.worker.on_alert_result = lambda ok, detail: self.post(
             lambda: self._on_alert_result(ok, detail)
         )
+        self.worker.on_wifi_event = lambda detail: self.post(
+            lambda: self._on_wifi_event(detail)
+        )
 
     # -- cross-thread plumbing -----------------------------------------------------------
 
@@ -713,6 +716,53 @@ class App:
             text = f"The board could not play the GIF: {detail}"
         self._gif_status.configure(text=text, foreground="#a00")
 
+    def _on_send_wifi(self) -> None:
+        """Hand the board its credentials, if the cable is what we are talking over."""
+        ssid = self._wifi_ssid.get().strip()
+        if not ssid:
+            self._wifi_status.configure(text="Fill the network name in first", foreground=BAD)
+            return
+        if getattr(self.worker.link, "kind", None) != "serial":
+            # Refused rather than sent and silently dropped: the board takes these over USB only,
+            # and "nothing happened" would be the worst possible answer here.
+            self._wifi_status.configure(
+                text="Plug the board in over USB first -- it will not take a password over the "
+                     "network, which is rather the point",
+                foreground=BAD,
+            )
+            return
+        self.worker.provision_wifi(ssid, self._wifi_password.get())
+        # The password has done its job and has no business sitting in a window afterwards.
+        self._wifi_password.set("")
+        self._wifi_status.configure(text="Sent. The board is joining...", foreground=UNKNOWN)
+
+    def _on_forget_wifi(self) -> None:
+        if getattr(self.worker.link, "kind", None) != "serial":
+            self._wifi_status.configure(
+                text="Plug the board in over USB to change this", foreground=BAD
+            )
+            return
+        self.worker.queue_command("WIFIOFF")
+        self._wifi_status.configure(text="Asked the board to forget its WiFi", foreground=UNKNOWN)
+
+    def _on_wifi_event(self, detail: str) -> None:
+        """What the board says about its own radio. See EVT:WIFI: in docs/PROTOCOL.md."""
+        state, _, rest = detail.partition(":")
+        if state == "online":
+            address = rest.partition(":")[0]
+            self._wifi_status.configure(
+                text=f"On WiFi at {address} -- the USB cable is now optional", foreground=OK
+            )
+        elif state == "connecting":
+            self._wifi_status.configure(text="Joining the network...", foreground=UNKNOWN)
+        elif state == "off":
+            self._wifi_status.configure(
+                text="WiFi is off on the board; it is USB only until you set it up",
+                foreground=UNKNOWN,
+            )
+        else:
+            self._wifi_status.configure(text=f"WiFi did not work: {rest or state}", foreground=BAD)
+
     def _on_gif_progress(self, sent: int, total: int) -> None:
         self._gif_progress.configure(value=100 * sent / max(1, total))
         self._gif_status.configure(text=f"Sending... {sent // 1024} of {total // 1024} KB")
@@ -772,11 +822,51 @@ class App:
             buttons, text="Open config folder", command=self._on_open_config,
         ).pack(side="left", padx=(6, 0))
 
+        wifi = ttk.LabelFrame(holder, text="WiFi")
+        wifi.pack(anchor="w", fill="x", pady=(16, 0))
+        wifi.columnconfigure(1, weight=1)
+
+        ttk.Label(
+            wifi,
+            text=(
+                "Give the board your WiFi and it stops needing the PC's USB port -- a\n"
+                "powerbank or any 5V charger will do. Credentials go over the cable only,\n"
+                "so plug it in for this bit."
+            ),
+            foreground="#666",
+            justify="left",
+        ).grid(row=0, column=0, columnspan=3, sticky="w", padx=8, pady=(6, 8))
+
+        self._wifi_ssid = tk.StringVar()
+        self._wifi_password = tk.StringVar()
+        ttk.Label(wifi, text="Network").grid(row=1, column=0, sticky="w", padx=(8, 6))
+        ttk.Entry(wifi, textvariable=self._wifi_ssid, width=32).grid(row=1, column=1,
+                                                                    sticky="w")
+        ttk.Label(wifi, text="Password").grid(row=2, column=0, sticky="w", padx=(8, 6),
+                                             pady=(4, 0))
+        ttk.Entry(wifi, textvariable=self._wifi_password, width=32, show="*").grid(
+            row=2, column=1, sticky="w", pady=(4, 0)
+        )
+
+        wifi_buttons = ttk.Frame(wifi)
+        wifi_buttons.grid(row=3, column=0, columnspan=3, sticky="w", padx=8, pady=(8, 0))
+        ttk.Button(wifi_buttons, text="Send to the board", command=self._on_send_wifi).pack(
+            side="left"
+        )
+        ttk.Button(wifi_buttons, text="Forget it", command=self._on_forget_wifi).pack(
+            side="left", padx=(6, 0)
+        )
+
+        self._wifi_status = ttk.Label(wifi, text="", foreground=UNKNOWN, wraplength=520,
+                                      justify="left")
+        self._wifi_status.grid(row=4, column=0, columnspan=3, sticky="w", padx=8, pady=(8, 8))
+
         ttk.Label(
             holder,
             text=(
                 "Phrases live in phrases.json in the config folder and are pushed to the board\n"
-                "over USB, so editing them needs no rebuild and no reflash. The board keeps its\n"
+                "over whichever link is up, so editing them needs no rebuild and no reflash.\n"
+                "The board keeps its\n"
                 "own flashed phrases only for when no PC is attached."
             ),
             foreground="#666",
@@ -808,6 +898,14 @@ class App:
                 var.set(index in working)
             self._alert_seconds.set(round(self.config.alert_seconds))
             self._alert_cooldown.set(round(self.config.alert_cooldown_seconds))
+            if not self._wifi_status.cget("text"):
+                # The board has said nothing this run, so the config is all we know.
+                self._wifi_status.configure(
+                    text=(f"Last seen on WiFi at {self.config.board_host}"
+                          if self.config.board_host
+                          else "Not set up yet -- the board is USB only"),
+                    foreground=UNKNOWN,
+                )
         finally:
             self._building = False
         self._refresh_statuses()

@@ -6,15 +6,15 @@ are in yet another meeting that could have been an email.
 
 What it says is up to you. A **tone** setting picks the register independently of your actual
 status, so you can be technically available and still phrase it as *"available in the way a fire
-exit is available"*. Phrases are edited in a window, not a text file, and reach the board over
-USB immediately -- no rebuild, no reflash.
+exit is available"*. Phrases are edited in a window, not a text file, and reach the board
+immediately -- no rebuild, no reflash.
 
 Inspired by the architecture of [vostoklabs/bongo_cat_monitor](https://github.com/vostoklabs/bongo_cat_monitor):
-a Windows tray app pushes short lines over USB serial to an ESP32-2432S028R. Here the input is
+a Windows tray app pushes short lines to an ESP32-2432S028R over USB or WiFi. Here the input is
 your Teams status instead of your keyboard, and the output is a meme instead of a cat.
 
 ```
-Teams log files ──tail──> tray app ──USB serial──> ESP32 ──> meme + caption
+Teams log files ──tail──> tray app ──USB or WiFi──> ESP32 ──> meme + caption
                                     "STATUS:IN_MEETING"
 ```
 
@@ -74,7 +74,8 @@ Captions come in English or Italian, again switchable at runtime:
 ## What you need
 
 - An **ESP32-2432S028R** ("Cheap Yellow Display", 2.8" 320x240 ILI9341, 4MB flash) and a USB cable.
-  No other board or screen size is supported.
+  No other board or screen size is supported. Once it is on your WiFi the cable only has to
+  supply 5V, so a powerbank or a charger will do -- see [Running it off the PC](#running-it-off-the-pc).
 - **Windows** with the new Microsoft Teams client. macOS is not supported.
 - **Python 3.10+**.
 
@@ -165,7 +166,7 @@ You should see something like:
 ```
 LOG:panel 240x320, mode mascot
 LOG:9 memes (port), language it, mode mascot, tone normal
-READY:1.3.0
+READY:1.4.0
 ```
 
 ### 5. Run the tray app
@@ -194,7 +195,9 @@ you can see what a phrase will look like before it gets there.
   board. A note under the hours says back what they were understood to mean, including which gap
   now counts as out of hours.
 - **Device** — a health block covering everything an alert depends on, plus reconnect, start with
-  Windows, and the config folder. See [Why the alert did nothing](#why-the-alert-did-nothing).
+  Windows, the config folder, and the **WiFi** box that cuts the board loose from the PC. See
+  [Why the alert did nothing](#why-the-alert-did-nothing) and
+  [Running it off the PC](#running-it-off-the-pc).
 
 Edits take effect on the next rotation tick. There is nothing to rebuild and nothing to reflash,
 because the phrases live on the PC and are pushed over USB — see
@@ -266,6 +269,47 @@ The bundled GIF (`assets/alert.gif`, flashed by `build_memes.py`) stays on the b
 fallback for when no PC is attached. Drop your own file there to change it — but note that
 `tools/make_alert_gif.py` *overwrites* `assets/alert.gif` with the drawn placeholder, so only run
 it if that is what you want back.
+
+## Running it off the PC
+
+The board speaks the same protocol over WiFi as it does over the cable, so once it has joined
+your network the USB port only has to supply 5V. A powerbank, a phone charger, the back of a
+monitor -- anything.
+
+### Setting it up
+
+With the board plugged in and the app running, open **Device** and fill in the **WiFi** box:
+
+1. Type your network name and password, then **Send to the board**. The credentials travel over
+   the cable and are stored on the board; they are refused over the network, which is the point
+   of doing this bit with the cable in.
+2. Wait for *On WiFi at 192.168.1.42*. The board puts the same address on its own screen while
+   nothing is driving it, which is how you find it once it is across the room.
+3. Unplug the USB cable from the PC and plug it into a powerbank.
+
+The app finds the board again on its own: the board broadcasts where it is every three seconds
+and the app listens for that, so a new address from the router changes nothing. Plugging the
+cable back into the PC takes over again immediately -- USB wins whenever it is there, which is
+what you want when something has gone wrong with the wireless side.
+
+**Forget it** on the same box takes the board back off WiFi.
+
+### What a powerbank actually costs you
+
+- The board draws roughly **0.15-0.2 A** with the radio on. A 10 000 mAh bank is about 6 000 mAh
+  at 5V, so **around 30 hours** -- a gadget you top up every day or two, not a permanent install.
+- Many powerbanks **switch themselves off below 50-75 mA**. At normal brightness you are well
+  clear of that; if you dim the screen a long way and the bank keeps cutting out, that is why.
+- If all you wanted was to stop the cable running back to the PC, a wall charger is strictly more
+  reliable than a bank. The WiFi is what frees the board; the powerbank is only which 5V you pick.
+
+### Who else can reach it
+
+The board listens on TCP 3141 and hangs up on anyone who cannot produce a token it generated
+itself and only ever reports over USB. One client at a time, and the WiFi commands are refused
+over the network entirely. That is enough to stop somebody else on the same WiFi putting their
+own captions on your screen; it is not encryption, and it is not meant to be. Details in
+[docs/PROTOCOL.md](docs/PROTOCOL.md#getting-on-the-wifi).
 
 ## Standalone .exe
 
@@ -360,6 +404,11 @@ That is the one case where you still need `build_memes.py` and `pio run -t uploa
 | Key | Default | Meaning |
 |---|---|---|
 | `port` | `null` | COM port, or auto-detect |
+| `transport` | `"auto"` | `auto` tries the cable then WiFi; `serial` or `network` pin one |
+| `board_host` | `null` | The board's address on WiFi; `null` waits for its beacon |
+| `board_port` | `3141` | TCP port the board listens on |
+| `discovery_port` | `3142` | UDP port the board broadcasts its address to |
+| `board_token` | `null` | The board's shared secret, filled in over USB |
 | `log_dir` | `null` | Teams log folder override |
 | `cloud_context` | `null` | With several accounts signed in, which one to trust |
 | `poll_seconds` | `1.0` | How often to read the logs |
@@ -412,6 +461,14 @@ which contexts were found.
 The app never writes to a port that doesn't answer its handshake, so an unrelated serial device
 is safe. Only one program can hold a COM port at a time, so quit any serial monitor first.
 
+**Board not found on WiFi.** Plug it in over USB and look at the **Device** tab: it says what
+the board last reported about its radio. A board that never gets past *Joining the network* has
+the wrong password or is out of range -- the two are indistinguishable from the board's end, so
+the message says both. If the board is online but the app cannot see it, something else may
+hold UDP 3142 (the log says so) or the two may be on networks that do not carry broadcasts
+between them, such as a guest SSID; set `board_host` in the config to the address the board
+shows on its own screen.
+
 **The .exe seems to do nothing.** It is a tray app with no window -- look for the little monitor
 icon in the notification area (you may need to expand the hidden icons). If it is not there, read
 `%APPDATA%\TeamsMemeDisplay\app.log`.
@@ -425,7 +482,7 @@ differ and this is the one part not verified on hardware. Everything else is una
 ## Layout
 
 ```
-pc_app/          Windows tray app: log tailing, presence state machine, serial link
+pc_app/          Windows tray app: log tailing, presence state machine, the link to the board
 pc_app/gui.py    The settings window: phrase editor, device settings, live preview
 pc_app/phrases.py   The phrase bank the PC pushes to the board
 pc_app/mascot_faces.py  Every expression, as parameters -- the source of truth for both sides
@@ -434,13 +491,16 @@ firmware/        PlatformIO project for the CYD (TFT_eSPI + TJpg_Decoder, no LVG
 firmware/src/mascot.cpp  The character, composed from shapes into a sprite
 pc_app/work_hours.py    The working day: two blocks, the lunch gap, midnight wrap included
 pc_app/gif_upload.py    Re-encodes an alert GIF and streams it to the board
+pc_app/net_link.py      The WiFi transport: discovery, the token handshake, framing
+pc_app/transport.py     Picks between the cable and WiFi, and swaps when one drops
+firmware/src/net_link.cpp  The board's end of that: one client, one token, one beacon
 firmware/src/alert.cpp  Plays the alert GIF, and receives an uploaded one
 tools/           Meme pack builder, mascot table generator, placeholder art
 captions/        Phrase banks, per language, tone and status
 docs/images/     README screenshots (regenerate: tools/make_docs_images.py)
 pc_app/i18n.py   Tray menu strings and status labels per language
 memes/           Your source images, one folder per status
-docs/PROTOCOL.md The serial contract between the two halves
+docs/PROTOCOL.md The contract between the two halves, over either transport
 ```
 
 ## Notes on memes and copyright

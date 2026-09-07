@@ -38,6 +38,10 @@ class SerialLink:
     """A resilient line-oriented link. Every send is best-effort: a dropped board must never
     take the tray app down, it should just reconnect when the board comes back."""
 
+    #: Which way this reaches the board. The settings window asks, because WiFi provisioning is
+    #: only accepted over the cable.
+    kind = "serial"
+
     def __init__(self, port: str | None = None, baud: int = 115200, dry_run: bool = False):
         self.configured_port = port
         self.baud = baud
@@ -205,12 +209,18 @@ class SerialLink:
         except Exception as exc:
             self._drop(exc)
             return
-        parts = self._rx.split("\n")
-        self._rx = parts.pop()
-        for part in parts:
-            line = part.strip()
-            if line:
-                yield line
+        lines, self._rx = split_lines(self._rx)
+        yield from lines
+
+
+def split_lines(buffer: str) -> tuple[list[str], str]:
+    """Complete lines out of *buffer*, and whatever is left of a line that has not arrived yet.
+
+    Shared with pc_app/net_link.py: both transports frame the same way, because the board does.
+    """
+    parts = buffer.split("\n")
+    remainder = parts.pop()
+    return [line for line in (part.strip() for part in parts) if line], remainder
 
 
 def open_serial(port: str, baud: int, timeout: float, write_timeout: float):

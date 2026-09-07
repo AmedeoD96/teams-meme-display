@@ -28,6 +28,22 @@ class Config:
     port: str | None = None
     baud: int = 115200
 
+    # -- how to reach the board ------------------------------------------------------------
+    # The board answers the same protocol over USB and over WiFi, so it can run off a powerbank
+    # anywhere on the desk. See pc_app/transport.py and docs/PROTOCOL.md.
+
+    #: "auto" tries the cable first and then the network; "serial" or "network" pin one of them.
+    transport: str = "auto"
+    #: Where the board is, when it is on WiFi. None means "wait for its discovery beacon", which
+    #: is the normal case -- this is filled in from EVT:WIFI: so a fixed address is never needed.
+    board_host: str | None = None
+    board_port: int = 3141
+    #: UDP port the board broadcasts that beacon to.
+    discovery_port: int = 3142
+    #: The secret the board generates on first boot and reports over USB (EVT:TOKEN:). It hangs
+    #: up on a network client that cannot produce it, so without this the WiFi side cannot work.
+    board_token: str | None = None
+
     #: Override the Teams log folder. None means the documented default location.
     log_dir: str | None = None
     #: When several Teams accounts are signed in, only trust presence from the account whose

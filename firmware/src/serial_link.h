@@ -1,4 +1,7 @@
-// Line-oriented serial protocol. See docs/PROTOCOL.md for the full command list.
+// Line-oriented command protocol. See docs/PROTOCOL.md for the full command list.
+//
+// The same parser serves both transports: USB serial, and the TCP client net_link hands over once
+// it has authenticated. Each has its own line buffer, because bytes from the two interleave.
 #pragma once
 
 #include <Arduino.h>
@@ -34,11 +37,23 @@ struct Handlers {
   void (*onGifBegin)(uint32_t bytes, uint32_t crc) = nullptr;
   void (*onGifData)(const String &encoded) = nullptr;
   void (*onGifEnd)() = nullptr;
+  //: WiFi provisioning. Accepted over USB only -- see kUsbOnly in serial_link.cpp -- so that
+  //: nobody on the network can rewrite the credentials or read the token back.
+  void (*onWifiSsid)(const String &ssid) = nullptr;
+  void (*onWifiPassword)(const String &base64) = nullptr;
+  void (*onWifiApply)() = nullptr;
+  void (*onWifiOff)() = nullptr;
+  void (*onWifiStatus)() = nullptr;
+  void (*onTokenGet)() = nullptr;
 };
 
 void begin(const Handlers &handlers);
 
-// Consume any complete lines waiting on the port. Call every loop.
+//: The second transport's stream, or nullptr when no client is attached. Registered by net_link
+//: so this module needs to know nothing about WiFi.
+void setSecondary(Stream *(*provider)());
+
+// Consume any complete lines waiting on either transport. Call every loop.
 void poll();
 
 // millis() of the last recognised command, for the PC-timeout watchdog.

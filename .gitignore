@@ -32,3 +32,4 @@ assets/icon.ico
 memes/*/*
 !memes/*/00_sample.*.png
 .tokensave/
+graphify-out/

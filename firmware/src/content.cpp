@@ -2,6 +2,8 @@
 
 #include <LittleFS.h>
 
+#include "say.h"
+
 namespace content {
 namespace {
 
@@ -82,7 +84,7 @@ bool begin(Orientation orientation, Language language) {
   gLanguage = language;
   gMounted = LittleFS.begin(false);
   if (!gMounted) {
-    Serial.println(F("LOG:no LittleFS -- run 'pio run -t uploadfs' to flash the meme pack"));
+    say::println(F("LOG:no LittleFS -- run 'pio run -t uploadfs' to flash the meme pack"));
     return false;
   }
   rescan();
@@ -95,14 +97,14 @@ void setOrientation(Orientation orientation) {
   if (orientation == gOrientation) return;
   gOrientation = orientation;
   rescan();
-  Serial.printf("LOG:orientation %s, %u memes\n", orientationFolder(gOrientation), totalMemes());
+  say::printf("LOG:orientation %s, %u memes\n", orientationFolder(gOrientation), totalMemes());
 }
 
 void setLanguage(Language language) {
   if (language == gLanguage) return;
   gLanguage = language;
   for (uint8_t i = 0; i < kStatusCount; ++i) gContent[i].lastCaption = -1;
-  Serial.printf("LOG:language %s\n", languageCode(gLanguage));
+  say::printf("LOG:language %s\n", languageCode(gLanguage));
 }
 
 Orientation orientation() { return gOrientation; }

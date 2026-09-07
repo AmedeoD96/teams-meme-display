@@ -10,13 +10,15 @@
 #include "alert.h"
 #include "content.h"
 #include "display.h"
+#include "net_link.h"
+#include "say.h"
 #include "serial_link.h"
 #include "status.h"
 #include "touch.h"
 
 namespace {
 
-constexpr char kVersion[] = "1.3.0";
+constexpr char kVersion[] = "1.4.0";
 
 // Show DISCONNECTED if the PC stops sending its STATUS heartbeat for this long. The app resends
 // every 5s by default, so this tolerates two missed beats before complaining.
@@ -35,6 +37,11 @@ bool gTimedOut = true;
 // nothing is driving us. Cleared on a PC timeout, which is what hands the board back to itself.
 String gPcCaption;
 
+// What net_link wants said while nothing is driving us -- the board's own address, once WiFi
+// is up. It is the only place that address exists until somebody connects, and the board may
+// well be on a battery on the other side of the desk.
+String gNetCaption;
+
 void renderFrame() {
   // The alert owns the panel while it is up. Whatever changed underneath is drawn when it ends,
   // from a clean slate -- see the alert::tick() branch in loop().
@@ -43,19 +50,22 @@ void renderFrame() {
   // runs on every rotation tick.
   const String meme =
       display::mode() == DisplayMode::Image ? content::nextMeme(gStatus) : String();
-  const String caption = gPcCaption.isEmpty() ? content::nextCaption(gStatus) : gPcCaption;
+  // The PC's words win; the network note stands in for while there is no PC at all.
+  String caption = gPcCaption;
+  if (caption.isEmpty() && gStatus == Status::Disconnected) caption = gNetCaption;
+  if (caption.isEmpty()) caption = content::nextCaption(gStatus);
   display::showFrame(gStatus, content::language(), gTone, meme, caption);
   gLastFrameMs = millis();
 }
 
 void applyStatus(Status status) {
   if (gTimedOut) {
-    Serial.println(F("LOG:PC is back"));
+    say::println(F("LOG:PC is back"));
     gTimedOut = false;
   }
   if (status == gStatus) return;
   gStatus = status;
-  Serial.printf("LOG:status %s\n", statusToken(status));
+  say::printf("LOG:status %s\n", statusToken(status));
   renderFrame();
 }
 
@@ -90,7 +100,7 @@ void onTone(Tone tone) {
   if (tone == gTone) return;
   gTone = tone;
   gPrefs.putUChar("tone", static_cast<uint8_t>(tone));
-  Serial.printf("LOG:tone %s\n", toneName(tone));
+  say::printf("LOG:tone %s\n", toneName(tone));
   renderFrame();  // the mascot is wearing the old expression
 }
 
@@ -113,6 +123,27 @@ void onGifBegin(uint32_t bytes, uint32_t crc) { alert::uploadBegin(bytes, crc); 
 void onGifData(const String &encoded) { alert::uploadChunk(encoded); }
 
 void onGifEnd() { alert::uploadEnd(); }
+
+// WiFi provisioning. serial_link only accepts these over USB; net_link does the work.
+void onWifiSsid(const String &ssid) { net_link::stageSsid(ssid); }
+
+void onWifiPassword(const String &base64) { net_link::stagePassword(base64); }
+
+void onWifiApply() { net_link::apply(); }
+
+void onWifiOff() { net_link::disable(); }
+
+void onWifiStatus() { net_link::reportStatus(); }
+
+void onTokenGet() { net_link::reportToken(); }
+
+// The board saying where it is, for while nobody has connected to it yet.
+void onNetInfo(const String &text) {
+  if (text == gNetCaption) return;
+  gNetCaption = text;
+  // Only worth a repaint while it is the thing on screen; otherwise the next frame has it.
+  if (gPcCaption.isEmpty() && gStatus == Status::Disconnected) renderFrame();
+}
 
 void onTransition(uint16_t ms) {
   if (ms == display::transitionMs()) return;
@@ -141,7 +172,7 @@ void checkPcTimeout() {
   if (gTimedOut) return;
   if (millis() - serial_link::lastCommandMs() < kPcTimeoutMs) return;
   gTimedOut = true;
-  Serial.println(F("LOG:PC timeout"));
+  say::println(F("LOG:PC timeout"));
   gStatus = Status::Disconnected;
   // Nobody is choosing our words any more, so fall back to the flashed bank rather than leaving
   // the last thing the PC said frozen on screen.
@@ -215,16 +246,32 @@ void setup() {
   handlers.onGifBegin = onGifBegin;
   handlers.onGifData = onGifData;
   handlers.onGifEnd = onGifEnd;
+  handlers.onWifiSsid = onWifiSsid;
+  handlers.onWifiPassword = onWifiPassword;
+  handlers.onWifiApply = onWifiApply;
+  handlers.onWifiOff = onWifiOff;
+  handlers.onWifiStatus = onWifiStatus;
+  handlers.onTokenGet = onTokenGet;
   serial_link::begin(handlers);
 
-  Serial.printf("LOG:%u memes (%s), language %s, mode %s\n", content::totalMemes(),
-                orientationFolder(orientation), languageCode(language),
-                displayModeName(displayMode));
+  // After the display, deliberately: the mascot sprite is tens of KB and WiFi wants ~50KB of
+  // its own, and the sprite is the one whose fallback (mascot::degraded()) costs you
+  // something to look at.
+  net_link::Callbacks netCallbacks;
+  netCallbacks.onInfo = onNetInfo;
+  net_link::begin(kVersion, netCallbacks);
+
+  say::printf("LOG:%u memes (%s), language %s, mode %s\n", content::totalMemes(),
+               orientationFolder(orientation), languageCode(language),
+               displayModeName(displayMode));
   renderFrame();
-  Serial.printf("READY:%s\n", kVersion);
+  say::printf("LOG:%u bytes of heap free\n", static_cast<unsigned>(ESP.getFreeHeap()));
+  say::printf("READY:%s\n", kVersion);
 }
 
 void loop() {
+  // Before poll(), so a client that just authenticated is already a channel.
+  net_link::tick();
   serial_link::poll();
   if (touch::tapped()) {
     // A tap during an alert dismisses it rather than asking for a new meme -- the GIF is in the
@@ -235,7 +282,7 @@ void loop() {
       renderFrame();
     } else {
       // Tell the PC so it can send a fresh phrase; the meme we can change on our own.
-      Serial.println(F("EVT:NEXT"));
+      say::println(F("EVT:NEXT"));
       renderFrame();
     }
   }

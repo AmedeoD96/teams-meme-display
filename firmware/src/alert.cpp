@@ -1,5 +1,6 @@
 #include "alert.h"
 
+#include "say.h"
 #include "serial_link.h"
 
 #include <AnimatedGIF.h>
@@ -57,7 +58,7 @@ void uploadFail(const char *reason) {
   if (gUploadFile) gUploadFile.close();
   LittleFS.remove(kGifTempPath);
   gUploading = false;
-  Serial.printf("EVT:GIFERR:%s\n", reason);
+  say::printf("EVT:GIFERR:%s\n", reason);
 }
 
 // -- LittleFS file callbacks --------------------------------------------------------------
@@ -138,13 +139,13 @@ void begin(TFT_eSPI *panel) { gPanel = panel; }
 void uploadBegin(uint32_t bytes, uint32_t crc) {
   if (gUploading) uploadFail("restarted");
   if (bytes == 0 || bytes > kMaxGifBytes) {
-    Serial.printf("EVT:GIFERR:size %lu\n", static_cast<unsigned long>(bytes));
+    say::printf("EVT:GIFERR:size %lu\n", static_cast<unsigned long>(bytes));
     return;
   }
   // The old GIF still occupies its own space until the rename, so both have to fit at once.
   const uint32_t free = LittleFS.totalBytes() - LittleFS.usedBytes();
   if (bytes + 4096 > free) {
-    Serial.printf("EVT:GIFERR:no space (%lu free)\n", static_cast<unsigned long>(free));
+    say::printf("EVT:GIFERR:no space (%lu free)\n", static_cast<unsigned long>(free));
     return;
   }
 
@@ -153,7 +154,7 @@ void uploadBegin(uint32_t bytes, uint32_t crc) {
   LittleFS.remove(kGifTempPath);
   gUploadFile = LittleFS.open(kGifTempPath, "w");
   if (!gUploadFile) {
-    Serial.println(F("EVT:GIFERR:cannot open temp file"));
+    say::println(F("EVT:GIFERR:cannot open temp file"));
     return;
   }
 
@@ -164,9 +165,9 @@ void uploadBegin(uint32_t bytes, uint32_t crc) {
   gChunksSinceAck = 0;
   gLastChunkMs = millis();
   gUploading = true;
-  Serial.printf("LOG:upload %lu bytes\n", static_cast<unsigned long>(bytes));
+  say::printf("LOG:upload %lu bytes\n", static_cast<unsigned long>(bytes));
   // An immediate ack releases the first window without waiting for it to be filled.
-  Serial.println(F("EVT:GIFACK:0"));
+  say::println(F("EVT:GIFACK:0"));
 }
 
 void uploadChunk(const String &encoded) {
@@ -197,13 +198,13 @@ void uploadChunk(const String &encoded) {
 
   if (++gChunksSinceAck >= kUploadAckEvery) {
     gChunksSinceAck = 0;
-    Serial.printf("EVT:GIFACK:%lu\n", static_cast<unsigned long>(gReceivedBytes));
+    say::printf("EVT:GIFACK:%lu\n", static_cast<unsigned long>(gReceivedBytes));
   }
 }
 
 void uploadEnd() {
   if (!gUploading) {
-    Serial.println(F("EVT:GIFERR:no upload in progress"));
+    say::println(F("EVT:GIFERR:no upload in progress"));
     return;
   }
   gUploadFile.close();
@@ -211,13 +212,13 @@ void uploadEnd() {
 
   if (gReceivedBytes != gExpectedBytes) {
     LittleFS.remove(kGifTempPath);
-    Serial.printf("EVT:GIFERR:short (%lu of %lu)\n", static_cast<unsigned long>(gReceivedBytes),
-                  static_cast<unsigned long>(gExpectedBytes));
+    say::printf("EVT:GIFERR:short (%lu of %lu)\n", static_cast<unsigned long>(gReceivedBytes),
+                 static_cast<unsigned long>(gExpectedBytes));
     return;
   }
   if (gRunningCrc != gExpectedCrc) {
     LittleFS.remove(kGifTempPath);
-    Serial.println(F("EVT:GIFERR:checksum"));
+    say::println(F("EVT:GIFERR:checksum"));
     return;
   }
 
@@ -225,10 +226,10 @@ void uploadEnd() {
   LittleFS.remove(kGifPath);
   if (!LittleFS.rename(kGifTempPath, kGifPath)) {
     LittleFS.remove(kGifTempPath);
-    Serial.println(F("EVT:GIFERR:rename failed"));
+    say::println(F("EVT:GIFERR:rename failed"));
     return;
   }
-  Serial.printf("EVT:GIFOK:%lu\n", static_cast<unsigned long>(gReceivedBytes));
+  say::printf("EVT:GIFOK:%lu\n", static_cast<unsigned long>(gReceivedBytes));
 }
 
 bool uploading() { return gUploading; }
@@ -237,14 +238,14 @@ bool play(uint32_t durationMs) {
   if (gPanel == nullptr || durationMs == 0) return false;
   if (gUploading) {
     // The file is being rewritten underneath us.
-    Serial.println(F("EVT:ALERTERR:uploading"));
+    say::println(F("EVT:ALERTERR:uploading"));
     return false;
   }
   if (gActive) stop();  // a second ALERT restarts cleanly rather than stacking
 
   if (!LittleFS.exists(kGifPath)) {
-    Serial.println(F("EVT:ALERTERR:nogif"));
-    Serial.println(F("LOG:no /alert.gif -- flash the pack or upload one from the settings window"));
+    say::println(F("EVT:ALERTERR:nogif"));
+    say::println(F("LOG:no /alert.gif -- flash the pack or upload one from the settings window"));
     return false;
   }
 
@@ -252,8 +253,8 @@ bool play(uint32_t durationMs) {
   // the JPEG path arrives in (see TJpgDec.setSwapBytes in display.cpp).
   gGif.begin(GIF_PALETTE_RGB565_BE);
   if (!gGif.open(kGifPath, openFile, closeFile, readFile, seekFile, drawLine)) {
-    Serial.printf("EVT:ALERTERR:decode %d\n", gGif.getLastError());
-    Serial.printf("LOG:could not open %s (gif error %d)\n", kGifPath, gGif.getLastError());
+    say::printf("EVT:ALERTERR:decode %d\n", gGif.getLastError());
+    say::printf("LOG:could not open %s (gif error %d)\n", kGifPath, gGif.getLastError());
     return false;
   }
 
@@ -271,8 +272,8 @@ bool play(uint32_t durationMs) {
   gActive = true;
   // Answered on the wire and not only in the log: the settings window's test button has no
   // other way to tell a playing alert apart from a board that never understood the command.
-  Serial.printf("EVT:ALERT:%lu\n", static_cast<unsigned long>(durationMs));
-  Serial.printf("LOG:alert %dx%d for %lums\n", width, height, static_cast<unsigned long>(durationMs));
+  say::printf("EVT:ALERT:%lu\n", static_cast<unsigned long>(durationMs));
+  say::printf("LOG:alert %dx%d for %lums\n", width, height, static_cast<unsigned long>(durationMs));
   return true;
 }
 
@@ -299,7 +300,7 @@ bool tick() {
   // stops being polled for the length of it. We schedule the next frame ourselves instead.
   int frameDelayMs = 0;
   if (gGif.playFrame(false, &frameDelayMs) < 0) {
-    Serial.printf("LOG:gif decode failed (error %d)\n", gGif.getLastError());
+    say::printf("LOG:gif decode failed (error %d)\n", gGif.getLastError());
     stop();
     return true;
   }

@@ -1,10 +1,29 @@
-# Serial protocol
+# Wire protocol
 
-Transport: USB CDC / CH340 serial, **115200 8N1**, ASCII, `\n`-terminated lines.
-Deliberately line-based and human-typable so the firmware can be driven from any serial
-terminal without the PC app (see "Testing by hand" below).
+ASCII, `\n`-terminated lines. Deliberately line-based and human-typable so the firmware can
+be driven from any serial terminal without the PC app (see "Testing by hand" below).
 
 Both sides ignore unknown commands and blank lines. Commands are case-sensitive.
+
+## Transports
+
+The same lines travel two ways, and no command knows which one carried it:
+
+| | |
+|---|---|
+| **USB serial** | CH340, **115200 8N1**. Always available, and the only side that may provision WiFi. |
+| **TCP** | Port **3141** over WiFi, once the board has credentials. The first line must be `AUTH:<token>`. |
+
+The board reads both at once, each with its own line buffer -- bytes from the two interleave,
+and a shared buffer would assemble lines neither sender ever wrote. Everything the board says
+goes out on **both**, so `pio device monitor` stays a complete view of the conversation even
+while the tray app is driving the board over the network.
+
+`STATUS:` feeds the same 15-second watchdog whichever way it arrives, so a TCP link that dies
+without closing is caught by exactly the mechanism that catches a pulled cable.
+
+Why WiFi at all: the board can then run off a powerbank or any 5V charger instead of the PC's
+USB port. See "Running it off the PC" in the README for what that costs in battery.
 
 ## Status tokens
 
@@ -49,6 +68,13 @@ Note that Teams never writes "in a meeting" as an availability value — it writ
 | `GIFDATA:<base64>` | One chunk of it. |
 | `GIFEND` | Verify and commit. |
 | `PING` | Liveness / port-detection probe. |
+| `AUTH:<token>` | **TCP only, and first.** See "Getting on the WiFi". |
+| `WIFI:<ssid>` | **USB only.** Stage the network to join. The value is the rest of the line, so a colon in the SSID is fine. |
+| `WIFIPASS:<base64>` | **USB only.** Stage the password, base64 so leading and trailing spaces survive the board's `trim()`. |
+| `WIFIAPPLY` | **USB only.** Store both in NVS and (re)start the radio. |
+| `WIFIOFF` | **USB only.** Forget the credentials and stop the radio. |
+| `WIFISTAT` | **USB only.** Ask for the current radio state. |
+| `TOKENGET` | **USB only.** Ask for the shared token. |
 
 ## Who owns the words
 
@@ -88,6 +114,11 @@ orientation and it falls back to the built-in drawn scene.
 | `EVT:GIFACK:<bytes>` | Upload flow control: that many bytes are safely written, send the next window. |
 | `EVT:GIFOK:<bytes>` | The upload verified and is now the alert GIF. |
 | `EVT:GIFERR:<reason>` | The upload was refused or failed. The previous GIF is untouched. |
+| `EVT:WIFI:off` | No credentials stored; the radio is not running. |
+| `EVT:WIFI:connecting` | Joining, or waiting to try again. |
+| `EVT:WIFI:online:<ip>:<rssi>` | On the network, listening on 3141. This is how the PC learns where the board is. |
+| `EVT:WIFI:failed:<reason>` | Could not join, or the connection was lost. |
+| `EVT:TOKEN:<hex>` | The shared token, in answer to `TOKENGET`. Never sent over TCP. |
 
 ## The out-of-hours alert
 
@@ -166,6 +197,46 @@ colours until it fits. Frames stay cropped to what changed, which is fine -- wit
 `ALERT:` is refused while an upload is in progress, because the decoder would be reading a file
 that is being rewritten underneath it.
 
+## Getting on the WiFi
+
+Credentials arrive over the cable and never leave the board:
+
+```
+WIFI:<ssid>                  ->  LOG:wifi ssid staged
+WIFIPASS:<base64 password>   ->  LOG:wifi password staged
+WIFIAPPLY                    ->  EVT:WIFI:connecting, then EVT:WIFI:online:192.168.1.42:-57
+TOKENGET                     ->  EVT:TOKEN:0123456789abcdef
+```
+
+**The six WiFi commands are refused over TCP**, with a `LOG:` line saying so. They carry the
+credentials and the token, and honouring them over the network would let whoever got in take
+the board off your network -- or read back the one secret keeping them out.
+
+**A network client must authenticate before anything it says is parsed.** `net_link.cpp` reads
+that first line itself, so an unauthenticated line never reaches `dispatch()` at all; a wrong
+token gets `LOG:bad token` and the socket is closed. The token is 16 hex digits from the
+hardware RNG, generated on first boot and kept in NVS. It is not a serious secret -- it is what
+stops the neighbour whose laptop is on the same WiFi putting their own captions on your screen.
+
+One client at a time, and **the newcomer wins**: a socket the PC has forgotten about can look
+alive from the board's end for minutes, and refusing the replacement would lock the board out
+for exactly that long.
+
+### Finding the board
+
+While it is online the board broadcasts a UDP datagram to port **3142** every three seconds:
+
+```
+TEAMSMEME:<version>:<ip>:<port>
+```
+
+`pc_app/net_link.py` listens for it, so a board that changes address stays reachable without
+anything being typed anywhere. The token is deliberately not in the beacon: it says where the
+board is, not how to drive it. If a datagram's sender address differs from the one written
+inside it the sender wins -- only one of the two is a place a connection can go.
+
+`board_host` in the config pins an address and skips discovery entirely.
+
 ## Port detection
 
 `pc_app/serial_link.py` enumerates COM ports, tries CH340 devices (VID:PID `1A86:7523`) first
@@ -212,6 +283,12 @@ CAPTION:Technically available. Emotionally, no.
 MODE:text
 TRANSITION:0
 ```
+
+The same lines work over the network once the board is on WiFi -- point any TCP tool at
+port 3141 and send `AUTH:<token>` first, with nothing in front of it. That is the opposite
+of the serial rule in "Port detection" above: a fresh TCP connection cannot have junk in
+its buffer, and a leading newline would be an empty first line, which the board reads as a
+failed handshake and hangs up on. `TOKENGET` over USB is how you learn the token.
 
 In `mascot` mode the screen is filled with the status colour dimmed to about a fifth, the
 character is composed into a sprite and pushed at roughly 25 fps, and the caption sits in the
